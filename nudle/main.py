@@ -1,104 +1,158 @@
 #!/usr/bin/env python3
 import queue
-import threading
 import sounddevice as sd
 import numpy as np
-import webrtcvad
+import time
+import tempfile
+import soundfile as sf
+import librosa
+
 from faster_whisper import WhisperModel
-import time  # stdlib time
 
 # --- Local imports ---
 from tts import speak
 from audio.ducking import duck, unduck
-from intents import radio
-from intents import music
-from intents import weather
-from intents import gag
-from intents import time as time_intent  # ✅ aliased intent module
-# from intents import status
+from intents import radio, music, weather, gag
+from intents import time as time_intent
+
+# ---------------- openWakeWord ----------------
+import openwakeword
+from openwakeword.model import Model
+
+# ---------------- Speaker recognition ----------------
+from speaker.embedding import SpeakerEmbedder
+from speaker.registry import SpeakerRegistry
+from speaker.verifier import SpeakerVerifier
+from speaker.enrollment import SpeakerEnrollment
+from intents.enroll_speaker import can_handle as can_enroll_speaker
+from intents.enroll_speaker import extract_name
 
 # ---------------- Configuration ----------------
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
-FRAME_DURATION_MS = 20
-FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
 
-WAKE_WORDS = [
-    "hey computer",
-    "hey, computer",
-    "a computer",
-    "noodle",
-    "hey noodle",
-    "hey, noodle",
-]
+OW_FRAME_MS = 80
+OW_FRAME_SIZE = int(SAMPLE_RATE * OW_FRAME_MS / 1000)  # 1280 samples
 
-VAD_MODE = 2  # 0–3 (higher = more aggressive)
 WHISPER_MODEL = "tiny.en"
+
+WAKE_CONFIDENCE = 0.9
+WAKE_COOLDOWN = 20
+
+COMMAND_TIMEOUT = 2.0
+CONVERSATION_TIMEOUT = 5
 
 # ---------------- Globals ----------------
 
 audio_queue = queue.Queue()
-vad = webrtcvad.Vad(VAD_MODE)
 
-whisper = WhisperModel(
-    WHISPER_MODEL,
-    device="cpu",
-    compute_type="int8"
-)
-
+wake_latched = False
 wake_active = False
 awaiting_command = False
-
 conversation_active = False
 conversation_context = {}
-conversation_timeout = 10
+
+last_wake_time = 0
 last_interaction_time = 0
+tts_active = False
+
+# ---------------- Models ----------------
+
+whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+
+openwakeword.utils.download_models()
+
+ow_model = Model(
+    wakeword_models=["hey jarvis"],  # ONNX model
+    enable_speex_noise_suppression=False,
+    vad_threshold=0.6,
+    #inference_framework="onnx",
+)
+
+speaker_embedder = SpeakerEmbedder(device="cpu")
+speaker_registry = SpeakerRegistry()
+speaker_verifier = SpeakerVerifier(speaker_registry, threshold=0.75)
 
 # ---------------- Audio callback ----------------
 
 def audio_callback(indata, frames, time_info, status):
     if status:
         print(f"Audio status: {status}")
-    audio_queue.put(indata.copy())
+    audio_queue.put(indata[:, 0].copy())
 
-# ---------------- VAD helpers ----------------
+# ---------------- Helpers ----------------
 
-def frame_generator():
-    """Yield 20ms PCM frames"""
-    buffer = b""
-
-    while True:
-        data = audio_queue.get()
-        pcm = (data[:, 0] * 32768).astype(np.int16).tobytes()
-        buffer += pcm
-
-        while len(buffer) >= FRAME_SIZE * 2:
-            yield buffer[: FRAME_SIZE * 2]
-            buffer = buffer[FRAME_SIZE * 2 :]
-
-def collect_utterance():
-    """Collect speech until silence detected"""
-    voiced_frames = []
-    silence_frames = 0
-    max_silence = int(0.5 / (FRAME_DURATION_MS / 1000))
-
-    for frame in frame_generator():
-        if vad.is_speech(frame, SAMPLE_RATE):
-            voiced_frames.append(frame)
-            silence_frames = 0
-        else:
-            silence_frames += 1
-            if voiced_frames and silence_frames > max_silence:
-                break
-
-    if not voiced_frames:
-        return None
-
-    return b"".join(voiced_frames)
+def flush_audio_queue():
+    while not audio_queue.empty():
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            break
 
 def conversation_expired():
-    return time.time() - last_interaction_time > conversation_timeout
+    return time.time() - last_interaction_time > CONVERSATION_TIMEOUT
+
+def collect_command_audio(timeout=COMMAND_TIMEOUT):
+    samples = []
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            samples.append(audio_queue.get(timeout=0.1))
+        except queue.Empty:
+            pass
+    if not samples:
+        return None
+    return np.concatenate(samples).astype(np.int16).tobytes()
+
+def embed_from_pcm(pcm_bytes):
+    audio = np.frombuffer(pcm_bytes, np.int16).astype(np.float32) / 32768.0
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+        sf.write(f.name, audio, SAMPLE_RATE)
+        return speaker_embedder.embed(f.name)
+
+def debug_speaker(pcm_bytes, label=""):
+    try:
+        embedding = embed_from_pcm(pcm_bytes)
+        name, score = speaker_verifier.verify(embedding)
+        if name:
+            print(f"🎤 Speaker{label}: {name} ({score:.2f})")
+        else:
+            print(f"🎤 Speaker{label}: unknown ({score:.2f})")
+        return name, score
+    except Exception as e:
+        print(f"⚠️ Speaker debug failed: {e}")
+        return None, 0.0
+
+def collect_speech_window(duration=1.5):
+    samples = []
+    start = time.time()
+    while time.time() - start < duration:
+        try:
+            samples.append(audio_queue.get(timeout=0.1))
+        except queue.Empty:
+            pass
+    if not samples:
+        return None
+    return np.concatenate(samples).astype(np.int16).tobytes()
+
+# ---------------- ONNX preprocessing ----------------
+
+def preprocess_onnx_frame(frame, sample_rate=SAMPLE_RATE):
+    audio = frame.astype(np.float32) / 32768.0
+    mel = librosa.feature.melspectrogram(
+        y=audio,
+        sr=sample_rate,
+        n_fft=512,
+        hop_length=160,
+        n_mels=16
+    )
+    mel = np.log(np.maximum(mel, 1e-6))
+    if mel.shape[1] < 96:
+        mel = np.pad(mel, ((0,0),(0, 96 - mel.shape[1])), mode='constant')
+    elif mel.shape[1] > 96:
+        mel = mel[:, :96]
+    return mel[np.newaxis, :, :]  # [1,16,96]
 
 # ---------------- STT ----------------
 
@@ -110,109 +164,190 @@ def transcribe(pcm_bytes):
 # ---------------- Intent router ----------------
 
 def handle_command(text):
-    if radio.can_handle(text):
-        return radio.handle(text)
-
-    if music.can_handle(text):
-        return music.handle(text)
-
-    if weather.can_handle(text):
-        return weather.handle(text)
-
-    if time_intent.can_handle(text):
-        return time_intent.handle(text)
-
-    if gag.can_handle(text):
-        return gag.handle(text)
-
+    for module in [radio, music, weather, time_intent, gag]:
+        if module.can_handle(text):
+            return module.handle(text)
     return "Sorry, I didn’t understand that."
 
 def handle_followup(text, context):
     intent_name = context.get("intent")
-
     if intent_name in ("timer", "alarm"):
         return time_intent.handle_followup(text, context)
-
     return "Sorry, I didn’t understand."
 
 # ---------------- Main loop ----------------
 
 def main():
-    global wake_active
-    global awaiting_command
-    global conversation_active
-    global conversation_context
-    global last_interaction_time
+    global wake_active, awaiting_command, wake_latched
+    global conversation_active, conversation_context
+    global last_interaction_time, last_wake_time
+    global tts_active
 
-    print("🎙️ reson-voice listening (VAD + wake word)")
+    print("🎙️ reson-voice listening (openWakeWord ONNX)")
+
+    # ---------------- Audio device detection ----------------
+    input_device = None
+    for i, dev in enumerate(sd.query_devices()):
+        if dev["max_input_channels"] > 0:
+            print(f"Input device #{i}: {dev['name']}")
+            if "wm8960" in dev["name"].lower():
+                input_device = i
+    if input_device is None:
+        print("⚠️ Waveshare WM8960 not found, using default input")
 
     with sd.InputStream(
+        device=input_device,
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
-        dtype="float32",
+        dtype="int16",
         callback=audio_callback,
+        blocksize=OW_FRAME_SIZE,
+        latency="high",
     ):
+        buffer = np.zeros(0, dtype=np.int16)
+
         while True:
-            pcm = collect_utterance()
-            if not pcm:
+            try:
+                chunk = audio_queue.get(timeout=0.1)
+            except queue.Empty:
                 continue
+            buffer = np.concatenate([buffer, chunk])
 
-            text = transcribe(pcm)
-            if not text:
-                continue
+            while len(buffer) >= OW_FRAME_SIZE:
+                frame = buffer[:OW_FRAME_SIZE]
+                buffer = buffer[OW_FRAME_SIZE:]
 
-            print(f"🗣️ Heard: {text}")
-
-            # ---------------- IDLE ----------------
-            if not wake_active and not conversation_active:
-                for ww in WAKE_WORDS:
-                    if ww in text:
-                        wake_active = True
-                        awaiting_command = True
-                        print(f"👂 Wake word detected: {ww}")
-                        duck()
-                        break
-                continue
-
-            # ---------------- IN CONVERSATION ----------------
-            if conversation_active:
-                if conversation_expired():
-                    speak("Okay, let me know if you need anything.")
-                    conversation_active = False
-                    conversation_context = {}
-                    unduck()
+                if tts_active or conversation_active:
                     continue
 
-                last_interaction_time = time.time()
-                response = handle_followup(text, conversation_context)
+                # ---------------- Wake word detection ----------------
+                try:
+                    if getattr(ow_model, "inference_framework", None) == "onnx":
+                        frame_input = preprocess_onnx_frame(frame)
+                    else:
+                        frame_input = frame
+                    prediction = ow_model.predict(frame_input)
+                except Exception as e:
+                    print(f"⚠️ Wake word predict failed: {e}")
+                    prediction = {}
 
-                if isinstance(response, dict):
-                    conversation_context = response
-                    speak(response["prompt"])
-                    continue
+                score = max(prediction.values(), default=0.0)
+                now = time.time()
+                if not wake_latched and score >= WAKE_CONFIDENCE and (now - last_wake_time) > WAKE_COOLDOWN:
+                    print(f"👂 Wake word detected! (score={score:.2f})")
+                    last_wake_time = now
+                    wake_latched = True
+                    wake_active = True
+                    awaiting_command = True
+                    flush_audio_queue()
+                    duck()
 
-                speak(response)
-                conversation_active = False
-                conversation_context = {}
-                unduck()
-                continue
-
-            # ---------------- AWAIT COMMAND ----------------
+            # ---------------- Await command ----------------
             if awaiting_command:
                 awaiting_command = False
                 wake_active = False
+                pcm = collect_command_audio()
+                if not pcm:
+                    wake_latched = False
+                    unduck()
+                    continue
 
+                speaker_pcm = collect_speech_window(1.5)
+                if speaker_pcm:
+                    speaker_name, speaker_score = debug_speaker(speaker_pcm, label=" (command)")
+                else:
+                    speaker_name, speaker_score = None, 0.0
+
+                embedding = embed_from_pcm(pcm)
+                speaker_name, speaker_score = speaker_verifier.verify(embedding)
+                conversation_context["speaker"] = speaker_name
+                conversation_context["speaker_confidence"] = speaker_score
+
+                text = transcribe(pcm)
+                if not text:
+                    wake_latched = False
+                    unduck()
+                    continue
+
+                print(f"🗣️ Heard: {text}")
+                if speaker_name and speaker_score >= 0.8:
+                    tts_active = True
+                    speak(f"Hi {speaker_name}")
+                    tts_active = False
+
+                # ---------------- Enrollment ----------------
+                if can_enroll_speaker(text):
+                    name = extract_name(text)
+                    tts_active = True
+                    speak(f"Hi {name}, it’s nice to meet you. Please speak naturally for a moment.")
+                    tts_active = False
+
+                    enrollment = SpeakerEnrollment(speaker_embedder, speaker_registry, collect_speech_window)
+                    enrollment.enroll(name, samples=4, seconds=4.0)
+
+                    pcm_test = collect_speech_window(2.0)
+                    spk, score = speaker_verifier.verify(embed_from_pcm(pcm_test))
+                    print(f"🎤 Verification test: {spk} ({score:.2f})")
+
+                    tts_active = True
+                    speak(f"Thanks {name}, I’ll remember you.")
+                    tts_active = False
+
+                    wake_latched = False
+                    unduck()
+                    continue
+
+                # ---------------- Normal command routing ----------------
                 response = handle_command(text)
-
+                tts_active = True
+                flush_audio_queue()
                 if isinstance(response, dict):
                     conversation_active = True
                     conversation_context = response
                     last_interaction_time = time.time()
                     speak(response["prompt"])
+                else:
+                    speak(response)
+                flush_audio_queue()
+                tts_active = False
+                unduck()
+                wake_latched = False
+
+            # ---------------- Conversation follow-up ----------------
+            if conversation_active:
+                if conversation_expired():
+                    tts_active = True
+                    flush_audio_queue()
+                    speak("Okay, let me know if you need anything.")
+                    flush_audio_queue()
+                    tts_active = False
+                    conversation_active = False
+                    conversation_context = {}
+                    unduck()
+                    wake_latched = False
                     continue
 
-                speak(response)
-                unduck()
+                pcm = collect_command_audio()
+                if not pcm:
+                    continue
+
+                text = transcribe(pcm)
+                print(f"🗣️ Heard: {text}")
+
+                response = handle_followup(text, conversation_context)
+                tts_active = True
+                flush_audio_queue()
+                if isinstance(response, dict):
+                    conversation_context = response
+                    speak(response["prompt"])
+                else:
+                    speak(response)
+                    conversation_active = False
+                    conversation_context = {}
+                    unduck()
+                    wake_latched = False
+                flush_audio_queue()
+                tts_active = False
 
 # ---------------- Entry point ----------------
 

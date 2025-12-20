@@ -18,8 +18,8 @@ from threading import Lock
 
 # ---------------- Configuration ----------------
 
-LOCAL_MUSIC_DIR = "/mnt/server/Music"
-INDEX_FILE = "music_index.json"
+LOCAL_MUSIC_DIR = "/home/gsparks/server/Music"
+INDEX_FILE = "/tmp/music_index.json"
 
 # ---------------- Globals ----------------
 

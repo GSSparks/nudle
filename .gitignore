@@ -1,5 +1,7 @@
 nudle/__pycache__
+nudle/assets/
 nudle/audio/__pycache__
 nudle/intents/__pycache__
+nudle/models/
 nudle/tts/__pycache__
 nudle/tts/voices
