@@ -37,7 +37,7 @@ OW_FRAME_SIZE = int(SAMPLE_RATE * OW_FRAME_MS / 1000)  # 1280 samples
 
 WHISPER_MODEL = "tiny.en"
 
-WAKE_CONFIDENCE = 0.9
+WAKE_CONFIDENCE = 0.75
 WAKE_COOLDOWN = 20
 
 COMMAND_TIMEOUT = 2.0
@@ -64,11 +64,12 @@ whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 openwakeword.utils.download_models()
 
 ow_model = Model(
-    wakeword_models=["hey jarvis"],  # ONNX model
+    wakeword_models=["/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx"],  # ONNX model
     enable_speex_noise_suppression=False,
     vad_threshold=0.6,
-    #inference_framework="onnx",
+    inference_framework="onnx",
 )
+print(f"Loaded models: {ow_model.models.keys()}")
 
 speaker_embedder = SpeakerEmbedder(device="cpu")
 speaker_registry = SpeakerRegistry()
@@ -183,7 +184,7 @@ def main():
     global last_interaction_time, last_wake_time
     global tts_active
 
-    print("🎙️ reson-voice listening (openWakeWord ONNX)")
+    print("🎙️ Nüdle listening (openWakeWord ONNX)")
 
     # ---------------- Audio device detection ----------------
     input_device = None
