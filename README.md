@@ -23,12 +23,12 @@ It listens continuously, wakes on a wake word, and responds to spoken commands u
 
 ## Tech Stack
 
-- Python 3.11
-- `sounddevice` + PortAudio
-- Whisper (faster-whisper)
-- WebRTC VAD
-- Piper TTS
-- Nix / flakes for reproducible dev environments
+- `Python 3.11`
+- `sounddevice` + `PortAudio`
+- `Whisper` (faster-whisper)
+- `WebRTC VAD`
+- `Piper TTS`
+
 
 ## Status
 
@@ -36,7 +36,7 @@ This project is **actively under development** and not yet intended for public u
 
 ## Name
 
-*nudle* is pronounced like **“nü-dle”** — the **ü** sounds like *“oo”*.
+*Nüdle* is pronounced like **“noo-dle”** — the **ü** sounds like *“oo”*.
 
 ---
 
