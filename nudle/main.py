@@ -355,4 +355,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n👋 Exiting reson-voice")
+        print("\n👋 Exiting Nüdle")
