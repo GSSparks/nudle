@@ -5,6 +5,7 @@ import requests
 import re
 import time
 import string
+import difflib
 
 # ---------------- Globals ----------------
 
@@ -16,17 +17,88 @@ current_index = 0
 stop_event = threading.Event()
 next_event = threading.Event()
 player_process = None
-player_thread = None  # keep reference to current playback thread
+player_thread = None
 
 LAST_PLAY_TIME = 0
-INTENT_COOLDOWN = 2  # seconds
+INTENT_COOLDOWN = 2
 
 player_lock = threading.Lock()
+
+# ---------------- Intent keywords ----------------
+
+PLAY_KEYWORDS = ["play", "put", "hear", "listen", "start", "queue"]
+STOP_KEYWORDS = ["stop", "pause", "halt", "quiet", "shut"]
+SKIP_KEYWORDS = ["next", "skip", "forward"]
+
+# Common misrecognitions
+PLAY_FUZZY = {
+    "place": "play",
+    "pay": "play",
+    "plate": "play",
+    "plane": "play",
+    "playing": "play",
+    "played": "play",
+    "plays": "play",
+    "player": "play",
+}
+
+STOP_FUZZY = {
+    "top": "stop",
+    "shop": "stop",
+    "stopped": "stop",
+}
+
+SKIP_FUZZY = {
+    "skip": "skip",
+    "skipping": "skip",
+    "snip": "skip",
+}
 
 # ---------------- Normalize helpers ----------------
 
 def normalize_name(s: str) -> str:
     return s.lower().translate(str.maketrans("", "", string.punctuation)).strip()
+
+def fuzzy_match_word(word: str, keyword_list: list, threshold: float = 0.75) -> bool:
+    """Check if a word matches any keyword using fuzzy matching."""
+    if word in keyword_list:
+        return True
+
+    # Check for close matches
+    matches = difflib.get_close_matches(word, keyword_list, n=1, cutoff=threshold)
+    return len(matches) > 0
+
+def correct_command_word(text: str) -> str:
+    """Apply fuzzy corrections to common misrecognitions."""
+    words = text.split()
+    corrected = []
+
+    for word in words:
+        # Check play fuzzy mappings
+        if word in PLAY_FUZZY:
+            corrected.append(PLAY_FUZZY[word])
+        elif word in STOP_FUZZY:
+            corrected.append(STOP_FUZZY[word])
+        elif word in SKIP_FUZZY:
+            corrected.append(SKIP_FUZZY[word])
+        else:
+            # Check fuzzy match against all play keywords
+            if fuzzy_match_word(word, PLAY_KEYWORDS, threshold=0.8):
+                closest = difflib.get_close_matches(word, PLAY_KEYWORDS, n=1, cutoff=0.8)
+                corrected.append(closest[0] if closest else word)
+            elif fuzzy_match_word(word, STOP_KEYWORDS, threshold=0.8):
+                closest = difflib.get_close_matches(word, STOP_KEYWORDS, n=1, cutoff=0.8)
+                corrected.append(closest[0] if closest else word)
+            elif fuzzy_match_word(word, SKIP_KEYWORDS, threshold=0.8):
+                closest = difflib.get_close_matches(word, SKIP_KEYWORDS, n=1, cutoff=0.8)
+                corrected.append(closest[0] if closest else word)
+            else:
+                corrected.append(word)
+
+    result = " ".join(corrected)
+    if result != text:
+        print(f"🔧 Corrected: '{text}' → '{result}'")
+    return result
 
 # ---------------- Text cleanup ----------------
 
@@ -37,6 +109,22 @@ INCIDENTAL_PHRASES = [
 
 def normalize_text(text: str) -> str:
     text = normalize_name(text)
+
+    # Only correct if FIRST word is in explicit fuzzy dictionaries
+    words = text.split()
+    if words and words[0] in PLAY_FUZZY:
+        words[0] = PLAY_FUZZY[words[0]]
+        text = " ".join(words)
+        print(f"🔧 Corrected: first word to '{words[0]}'")
+    elif words and words[0] in STOP_FUZZY:
+        words[0] = STOP_FUZZY[words[0]]
+        text = " ".join(words)
+        print(f"🔧 Corrected: first word to '{words[0]}'")
+    elif words and words[0] in SKIP_FUZZY:
+        words[0] = SKIP_FUZZY[words[0]]
+        text = " ".join(words)
+        print(f"🔧 Corrected: first word to '{words[0]}'")
+
     for phrase in INCIDENTAL_PHRASES:
         text = text.replace(phrase, "")
     return " ".join(text.split())
@@ -64,8 +152,9 @@ def extract_slots(text: str) -> dict:
     return slots
 
 def extract_free_text(text: str) -> str:
+    # Expanded list to include more filler words
     text = re.sub(
-        r"\b(play|put on|hear|listen|music|song|album|genre|the|by|from)\b",
+        r"\b(play|put|on|hear|listen|music|song|album|genre|the|by|from|some|a|an|start|queue)\b",
         "",
         text
     )
@@ -84,7 +173,6 @@ def stop_current_playback():
             player_process.terminate()
             player_process = None
 
-    # Wait for the thread to finish
     if player_thread and player_thread.is_alive():
         player_thread.join(timeout=2.0)
         player_thread = None
@@ -151,7 +239,25 @@ def play_tracks(tracks_list):
 
 # ---------------- Backend interaction ----------------
 
+def check_playlist_exists(prompt):
+    """Check if a playlist exists WITHOUT starting playback."""
+    try:
+        res = requests.post(
+            BACKEND_URL,
+            json={"prompt": prompt, "mode": "local", "source": "local"},
+            timeout=10,
+        )
+        if res.status_code == 404:
+            return False, None
+        res.raise_for_status()
+        data = res.json()
+        return bool(data.get("tracks")), data
+    except Exception as e:
+        print(f"⚠️ Error checking playlist: {e}")
+        return False, None
+
 def fetch_playlist(prompt, interrupt=True):
+    """Fetch playlist and START playback."""
     global tracks, player_thread
 
     try:
@@ -175,7 +281,6 @@ def fetch_playlist(prompt, interrupt=True):
 
         tracks = new_tracks
 
-        # Start new playback thread safely
         player_thread = threading.Thread(target=play_tracks, args=(tracks,), daemon=True)
         player_thread.start()
 
@@ -188,6 +293,7 @@ def fetch_playlist(prompt, interrupt=True):
 # ---------------- Music intent parser ----------------
 
 def parse_music_prompt(prompt: str) -> dict:
+    """Parse the prompt to determine intent WITHOUT starting playback."""
     text = normalize_text(prompt)
     text = re.split(r"[.?!]", text)[0].strip()
     slots = extract_slots(text)
@@ -203,11 +309,29 @@ def parse_music_prompt(prompt: str) -> dict:
     if not raw:
         return {"type": "unknown", "value": None, "raw": text}
 
-    if fetch_playlist(f"album:{raw}", interrupt=False)[0]:
+    # Smart album search: try full match, then partial matches
+    # Try as full album name
+    if check_playlist_exists(f"album:{raw}")[0]:
         return {"type": "album", "value": raw, "raw": text}
-    if fetch_playlist(f"genre:{raw}", interrupt=False)[0]:
+
+    # Try as partial album name (for albums like "Echoes - The Best of...")
+    # Split on common separators and try first part
+    for separator in [' - ', ': ', ' / ']:
+        if separator in raw:
+            first_part = raw.split(separator)[0].strip()
+            if first_part and check_playlist_exists(f"album:{first_part}")[0]:
+                return {"type": "album", "value": first_part, "raw": text}
+
+    # Try as genre
+    if check_playlist_exists(f"genre:{raw}")[0]:
         return {"type": "genre", "value": raw, "raw": text}
-    if fetch_playlist(raw, interrupt=False)[0]:
+
+    # Try as artist
+    if check_playlist_exists(f"artist:{raw}")[0]:
+        return {"type": "artist", "value": raw, "raw": text}
+
+    # Try as song
+    if check_playlist_exists(raw)[0]:
         return {"type": "song", "value": raw, "raw": text}
 
     return {"type": "unknown", "value": raw, "raw": text}
@@ -215,11 +339,24 @@ def parse_music_prompt(prompt: str) -> dict:
 # ---------------- Intent interface ----------------
 
 def can_handle(text: str) -> bool:
+    """Enhanced intent detection with fuzzy matching."""
     text = text.lower()
-    return any(k in text for k in [
-        "play", "put on", "music", "song", "album",
-        "hear", "listen", "stop", "pause", "skip", "next"
-    ])
+    words = text.split()
+
+    # Direct keyword match
+    for word in words:
+        if word in PLAY_KEYWORDS + STOP_KEYWORDS + SKIP_KEYWORDS:
+            return True
+        if word in PLAY_FUZZY or word in STOP_FUZZY or word in SKIP_FUZZY:
+            return True
+        # Fuzzy match
+        if (fuzzy_match_word(word, PLAY_KEYWORDS, 0.75) or
+            fuzzy_match_word(word, STOP_KEYWORDS, 0.75) or
+            fuzzy_match_word(word, SKIP_KEYWORDS, 0.75)):
+            return True
+
+    # Fallback to general music keywords
+    return any(k in text for k in ["music", "song", "album"])
 
 def handle(text: str):
     global LAST_PLAY_TIME
@@ -230,12 +367,18 @@ def handle(text: str):
     text = normalize_text(text)
     text = re.split(r"[.?!]", text)[0].strip()
 
-    if any(w in text for w in ["stop", "pause", "shut up"]):
-        stop_current_playback()
-        return "Music stopped."
-    if any(w in text for w in ["next", "skip"]):
-        skip_to_next_track()
-        return "Skipping to the next track."
+    # Check for stop/pause commands
+    words = text.split()
+    for word in words:
+        if word in STOP_KEYWORDS or word in STOP_FUZZY or fuzzy_match_word(word, STOP_KEYWORDS, 0.75):
+            stop_current_playback()
+            return "Music stopped."
+
+    # Check for skip commands
+    for word in words:
+        if word in SKIP_KEYWORDS or word in SKIP_FUZZY or fuzzy_match_word(word, SKIP_KEYWORDS, 0.75):
+            skip_to_next_track()
+            return "Skipping to the next track."
 
     intent = parse_music_prompt(text)
     print("🎯 MUSIC INTENT:", intent)
@@ -258,16 +401,16 @@ def handle(text: str):
                 return f"Playing {matched_value}"
         else:
             if t == "album":
-                return f"Sorry, I couldn’t find the album {v}"
+                return f"Sorry, I couldn't find the album {v}"
             elif t == "artist":
-                return f"Sorry, I couldn’t find music by {v}"
+                return f"Sorry, I couldn't find music by {v}"
             elif t == "genre":
-                return f"Sorry, I couldn’t find any {v} music"
+                return f"Sorry, I couldn't find any {v} music"
             else:
-                return f"Sorry, I couldn’t find the song {v}"
+                return f"Sorry, I couldn't find the song {v}"
 
     if t == "ambiguous":
         opts = ", ".join(intent.get("candidates", []))
         return f"I found multiple matches for {v}. Did you mean the {opts}?"
 
-    return "Sorry, I couldn’t figure out what music you wanted."
+    return "Sorry, I couldn't figure out what music you wanted."

@@ -6,6 +6,7 @@ import time
 import tempfile
 import soundfile as sf
 import librosa
+from scipy import signal
 
 from faster_whisper import WhisperModel
 
@@ -64,7 +65,7 @@ whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 openwakeword.utils.download_models()
 
 ow_model = Model(
-    wakeword_models=["/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx"],  # ONNX model
+    wakeword_models=["/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx"],
     enable_speex_noise_suppression=False,
     vad_threshold=0.6,
     inference_framework="onnx",
@@ -73,7 +74,7 @@ print(f"Loaded models: {ow_model.models.keys()}")
 
 speaker_embedder = SpeakerEmbedder(device="cpu")
 speaker_registry = SpeakerRegistry()
-speaker_verifier = SpeakerVerifier(speaker_registry, threshold=0.75)
+speaker_verifier = SpeakerVerifier(speaker_registry, threshold=0.70, auto_learn_threshold=0.80)
 
 # ---------------- Audio callback ----------------
 
@@ -106,25 +107,6 @@ def collect_command_audio(timeout=COMMAND_TIMEOUT):
         return None
     return np.concatenate(samples).astype(np.int16).tobytes()
 
-def embed_from_pcm(pcm_bytes):
-    audio = np.frombuffer(pcm_bytes, np.int16).astype(np.float32) / 32768.0
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
-        sf.write(f.name, audio, SAMPLE_RATE)
-        return speaker_embedder.embed(f.name)
-
-def debug_speaker(pcm_bytes, label=""):
-    try:
-        embedding = embed_from_pcm(pcm_bytes)
-        name, score = speaker_verifier.verify(embedding)
-        if name:
-            print(f"🎤 Speaker{label}: {name} ({score:.2f})")
-        else:
-            print(f"🎤 Speaker{label}: unknown ({score:.2f})")
-        return name, score
-    except Exception as e:
-        print(f"⚠️ Speaker debug failed: {e}")
-        return None, 0.0
-
 def collect_speech_window(duration=1.5):
     samples = []
     start = time.time()
@@ -136,6 +118,108 @@ def collect_speech_window(duration=1.5):
     if not samples:
         return None
     return np.concatenate(samples).astype(np.int16).tobytes()
+
+# ---------------- Voice Activity Detection ----------------
+
+def detect_speech_segments(audio, sample_rate=16000, frame_length=0.025, frame_step=0.010):
+    """
+    Detect speech segments in audio using energy-based VAD.
+    Returns: (has_speech, speech_ratio, clean_audio)
+    """
+    # Convert to float
+    if audio.dtype == np.int16:
+        audio = audio.astype(np.float32) / 32768.0
+
+    # Calculate frame parameters
+    frame_length_samples = int(frame_length * sample_rate)
+    frame_step_samples = int(frame_step * sample_rate)
+
+    # Calculate energy per frame
+    frames = []
+    for i in range(0, len(audio) - frame_length_samples, frame_step_samples):
+        frame = audio[i:i + frame_length_samples]
+        energy = np.sqrt(np.mean(frame ** 2))
+        frames.append(energy)
+
+    if not frames:
+        return False, 0.0, audio
+
+    frames = np.array(frames)
+
+    # Adaptive threshold: mean + 0.5 * std
+    threshold = np.mean(frames) + 0.5 * np.std(frames)
+
+    # Count speech frames
+    speech_frames = np.sum(frames > threshold)
+    speech_ratio = speech_frames / len(frames)
+
+    has_speech = speech_ratio > 0.2 # VAD threshold
+
+    return has_speech, speech_ratio, audio
+
+def extract_speech_features(pcm_bytes, sample_rate=16000):
+    """
+    Extract quality metrics from audio for debugging.
+    """
+    audio = np.frombuffer(pcm_bytes, np.int16).astype(np.float32) / 32768.0
+
+    # Energy
+    energy = np.sqrt(np.mean(audio ** 2))
+
+    # Zero-crossing rate (indicator of speech vs noise)
+    zcr = np.mean(np.abs(np.diff(np.sign(audio)))) / 2
+
+    # Peak amplitude
+    peak = np.max(np.abs(audio))
+
+    # Speech detection
+    has_speech, speech_ratio, _ = detect_speech_segments(audio, sample_rate)
+
+    return {
+        "energy": energy,
+        "zcr": zcr,
+        "peak": peak,
+        "has_speech": has_speech,
+        "speech_ratio": speech_ratio,
+        "duration": len(audio) / sample_rate
+    }
+
+def embed_from_pcm(pcm_bytes, debug=False):
+    """
+    Enhanced version with quality checks and preprocessing.
+    """
+    audio = np.frombuffer(pcm_bytes, np.int16).astype(np.float32) / 32768.0
+
+    # Quality checks
+    features = extract_speech_features(pcm_bytes, SAMPLE_RATE)
+
+    if debug:
+        print(f"   📊 Audio: energy={features['energy']:.4f}, "
+              f"speech={features['speech_ratio']:.0%}, "
+              f"duration={features['duration']:.1f}s")
+
+    # Reject low-quality audio
+    if not features["has_speech"]:
+        if debug:
+            print(f"   ⚠️ No speech detected")
+        return None, features
+
+    if features["energy"] < 0.005: # Energy Threshold
+        if debug:
+            print(f"   ⚠️ Audio too quiet")
+        return None, features
+
+    # Apply pre-emphasis filter to boost high frequencies
+    audio = signal.lfilter([1, -0.97], [1], audio)
+
+    # Normalize audio
+    audio = audio / (np.max(np.abs(audio)) + 1e-6)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+        sf.write(f.name, audio, SAMPLE_RATE)
+        embedding = speaker_embedder.embed(f.name, debug=debug)
+
+    return embedding, features
 
 # ---------------- ONNX preprocessing ----------------
 
@@ -153,7 +237,7 @@ def preprocess_onnx_frame(frame, sample_rate=SAMPLE_RATE):
         mel = np.pad(mel, ((0,0),(0, 96 - mel.shape[1])), mode='constant')
     elif mel.shape[1] > 96:
         mel = mel[:, :96]
-    return mel[np.newaxis, :, :]  # [1,16,96]
+    return mel[np.newaxis, :, :]
 
 # ---------------- STT ----------------
 
@@ -165,16 +249,94 @@ def transcribe(pcm_bytes):
 # ---------------- Intent router ----------------
 
 def handle_command(text):
-    for module in [radio, music, weather, time_intent, gag]:
+    for module in [time_intent, radio, music, weather, gag]:
         if module.can_handle(text):
             return module.handle(text)
-    return "Sorry, I didn’t understand that."
+    return "Sorry, I didn't understand that."
 
 def handle_followup(text, context):
     intent_name = context.get("intent")
     if intent_name in ("timer", "alarm"):
         return time_intent.handle_followup(text, context)
-    return "Sorry, I didn’t understand."
+    return "Sorry, I didn't understand."
+
+# ---------------- Enhanced Enrollment ----------------
+
+def enroll_speaker_safe(name, enrollment):
+    """
+    Safe enrollment with quality validation.
+    """
+    name = name.lower()
+    embeddings = []
+
+    print(f"🎤 Starting enrollment for {name}")
+    print(f"   Speak clearly and naturally")
+    print(f"   Tip: Speak full sentences, not just sounds")
+
+    successful_samples = 0
+    attempts = 0
+    max_attempts = 8
+    target_samples = 5
+
+    while successful_samples < target_samples and attempts < max_attempts:
+        attempts += 1
+        print(f"\n📝 Sample {successful_samples+1}/{target_samples} - Get ready...")
+        time.sleep(1.5)
+
+        pcm = enrollment.collect_speech(4.0)
+        if not pcm:
+            print("⚠️ No audio captured")
+            continue
+
+        # Quality check
+        embedding, features = embed_from_pcm(pcm, debug=True)
+
+        if embedding is None:
+            print("⚠️ Audio quality too poor, try again")
+            continue
+
+        # Check consistency with existing samples
+        if embeddings:
+            similarities = [np.dot(embedding, prev_emb) for prev_emb in embeddings]
+            avg_sim = np.mean(similarities)
+
+            if avg_sim < 0.4:
+                print(f"⚠️ Sample inconsistent (similarity={avg_sim:.2f})")
+                print(f"   Make sure it's the same person speaking")
+                continue
+
+            print(f"✅ Good sample (similarity: {avg_sim:.2f})")
+        else:
+            print(f"✅ Baseline sample")
+
+        embeddings.append(embedding)
+        enrollment.registry.add_embedding(name, embedding)
+        successful_samples += 1
+
+    if successful_samples < 3:
+        print(f"❌ Enrollment failed - only {successful_samples} good samples")
+        return None
+
+    print(f"\n🧠 Enrollment complete with {successful_samples} samples")
+
+    # Calculate stats
+    if len(embeddings) > 1:
+        sims = []
+        for i in range(len(embeddings)):
+            for j in range(i+1, len(embeddings)):
+                sim = np.dot(embeddings[i], embeddings[j])
+                sims.append(sim)
+        avg_intra_sim = np.mean(sims)
+        print(f"   Intra-speaker similarity: {avg_intra_sim:.3f}")
+
+        if avg_intra_sim < 0.6:
+            print(f"   ⚠️ Warning: Low consistency. Consider re-enrolling.")
+        elif avg_intra_sim < 0.75:
+            print(f"   ⚙️ Acceptable enrollment")
+        else:
+            print(f"   ✅ Excellent enrollment!")
+
+    return name
 
 # ---------------- Main loop ----------------
 
@@ -247,23 +409,27 @@ def main():
             if awaiting_command:
                 awaiting_command = False
                 wake_active = False
+
+                # Collect command audio
                 pcm = collect_command_audio()
                 if not pcm:
                     wake_latched = False
                     unduck()
                     continue
 
-                speaker_pcm = collect_speech_window(1.5)
-                if speaker_pcm:
-                    speaker_name, speaker_score = debug_speaker(speaker_pcm, label=" (command)")
-                else:
-                    speaker_name, speaker_score = None, 0.0
+                # Extract embedding with quality checks
+                embedding, features = embed_from_pcm(pcm, debug=True)
 
-                embedding = embed_from_pcm(pcm)
-                speaker_name, speaker_score = speaker_verifier.verify(embedding)
+                if embedding is None:
+                    print("⚠️ Poor audio quality, skipping speaker verification")
+                    speaker_name, speaker_score = None, 0.0
+                else:
+                    speaker_name, speaker_score = speaker_verifier.verify(embedding, auto_learn=True)
+
                 conversation_context["speaker"] = speaker_name
                 conversation_context["speaker_confidence"] = speaker_score
 
+                # Transcribe
                 text = transcribe(pcm)
                 if not text:
                     wake_latched = False
@@ -271,28 +437,71 @@ def main():
                     continue
 
                 print(f"🗣️ Heard: {text}")
-                if speaker_name and speaker_score >= 0.8:
+
+                # Greet if confident
+                if speaker_name and speaker_score >= 0.70:
                     tts_active = True
                     speak(f"Hi {speaker_name}")
                     tts_active = False
+                    print(f"✅ Recognized: {speaker_name} ({speaker_score:.2f})")
+                elif speaker_name and speaker_score >= 0.50:
+                    print(f"🤔 Possible speaker: {speaker_name} (confidence: {speaker_score:.2f})")
+                else:
+                    print(f"❓ Unknown speaker (best: {speaker_name}, {speaker_score:.2f})")
 
                 # ---------------- Enrollment ----------------
                 if can_enroll_speaker(text):
                     name = extract_name(text)
-                    tts_active = True
-                    speak(f"Hi {name}, it’s nice to meet you. Please speak naturally for a moment.")
-                    tts_active = False
 
-                    enrollment = SpeakerEnrollment(speaker_embedder, speaker_registry, collect_speech_window)
-                    enrollment.enroll(name, samples=4, seconds=4.0)
-
-                    pcm_test = collect_speech_window(2.0)
-                    spk, score = speaker_verifier.verify(embed_from_pcm(pcm_test))
-                    print(f"🎤 Verification test: {spk} ({score:.2f})")
+                    # Clear existing
+                    if speaker_registry.has_speaker(name):
+                        speaker_registry.clear_speaker(name)
+                        print(f"🔄 Clearing old enrollment for {name}")
 
                     tts_active = True
-                    speak(f"Thanks {name}, I’ll remember you.")
+                    speak(f"Hi {name}, let's get to know your voice. I'll ask you to speak 5 times.")
                     tts_active = False
+
+                    time.sleep(1.0)
+
+                    # Use enhanced enrollment
+                    enrollment_obj = SpeakerEnrollment(
+                        speaker_embedder,
+                        speaker_registry,
+                        collect_speech_window,
+                        SAMPLE_RATE
+                    )
+                    result = enroll_speaker_safe(name, enrollment_obj)
+
+                    if result:
+                        # Immediate test
+                        tts_active = True
+                        speak("Great! Now say something to test if I recognize you.")
+                        tts_active = False
+
+                        time.sleep(0.5)
+                        pcm_test = collect_speech_window(3.0)
+                        test_embedding, test_features = embed_from_pcm(pcm_test, debug=True)
+
+                        if test_embedding is not None:
+                            test_name, test_score = speaker_verifier.verify(test_embedding, auto_learn=False)
+                            print(f"🧪 Verification: {test_name} ({test_score:.3f})")
+
+                            if test_score >= 0.70:
+                                tts_active = True
+                                speak(f"Perfect! I recognize you, {name}.")
+                                tts_active = False
+                            else:
+                                tts_active = True
+                                speak("I'm having trouble recognizing you. Let's try enrolling again.")
+                                tts_active = False
+
+                        stats = speaker_registry.get_stats(name)
+                        print(f"📊 Final stats: {stats}")
+                    else:
+                        tts_active = True
+                        speak("Sorry, I couldn't complete the enrollment. Let's try again later.")
+                        tts_active = False
 
                     wake_latched = False
                     unduck()

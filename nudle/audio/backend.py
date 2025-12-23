@@ -124,9 +124,22 @@ def find_by_field(field, query, cutoff=0.7):
         if e.get(field)
     })
 
-    match = resolve_exact_or_fuzzy(values, q, cutoff)
-    if not match:
-        return None, []
+    # First try exact match
+    if q in values:
+        match = q
+    else:
+        # Try fuzzy match
+        matches = difflib.get_close_matches(q, values, n=1, cutoff=cutoff)
+        if matches:
+            match = matches[0]
+        else:
+            # NEW: Try partial match - find albums that CONTAIN the query
+            partial_matches = [v for v in values if q in v or v in q]
+            if partial_matches:
+                # Sort by length - prefer shorter matches (more specific)
+                match = sorted(partial_matches, key=len)[0]
+            else:
+                return None, []
 
     tracks = sorted(
         e["path"]
