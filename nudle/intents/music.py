@@ -2,168 +2,191 @@
 import threading
 import subprocess
 import requests
-import os
 import re
 import time
 import string
 import difflib
 
 # ---------------- Globals ----------------
-PLAYER_CMD = "mpg123"
-BACKEND_URL = "http://localhost:8000/playlist"
 
-KNOWN_GENRES = []
-KNOWN_ALBUMS = []
+PLAYER_CMD = ["mpg123", "-q"]
+BACKEND_URL = "http://localhost:8000/playlist"
 
 tracks = []
 current_index = 0
 stop_event = threading.Event()
 next_event = threading.Event()
 player_process = None
+player_thread = None
 
 LAST_PLAY_TIME = 0
-INTENT_COOLDOWN = 3  # seconds
+INTENT_COOLDOWN = 2
+
+player_lock = threading.Lock()
+
+# ---------------- Intent keywords ----------------
+
+PLAY_KEYWORDS = ["play", "put", "hear", "listen", "start", "queue"]
+STOP_KEYWORDS = ["stop", "pause", "halt", "quiet", "shut"]
+SKIP_KEYWORDS = ["next", "skip", "forward"]
+
+# Common misrecognitions
+PLAY_FUZZY = {
+    "place": "play",
+    "pay": "play",
+    "plate": "play",
+    "plane": "play",
+    "playing": "play",
+    "played": "play",
+    "plays": "play",
+    "player": "play",
+}
+
+STOP_FUZZY = {
+    "top": "stop",
+    "shop": "stop",
+    "stopped": "stop",
+}
+
+SKIP_FUZZY = {
+    "skip": "skip",
+    "skipping": "skip",
+    "snip": "skip",
+}
 
 # ---------------- Normalize helpers ----------------
 
 def normalize_name(s: str) -> str:
-    return (
-        s.lower()
-        .translate(str.maketrans("", "", string.punctuation))
-        .strip()
-    )
+    return s.lower().translate(str.maketrans("", "", string.punctuation)).strip()
 
-# ---------------- Explicit Genre Detection ----------------
+def fuzzy_match_word(word: str, keyword_list: list, threshold: float = 0.75) -> bool:
+    """Check if a word matches any keyword using fuzzy matching."""
+    if word in keyword_list:
+        return True
 
-def detect_genre_explicit(text: str) -> str | None:
-    """
-    Detect genre safely without stealing song titles.
-    Supports:
-      - play some jazz
-      - some rock
-      - jazz
-      - play jazz music
-    """
-    if not KNOWN_GENRES:
-        return None
+    # Check for close matches
+    matches = difflib.get_close_matches(word, keyword_list, n=1, cutoff=threshold)
+    return len(matches) > 0
 
-    text_norm = normalize_name(text)
-    print("DEBUG genre text:", text_norm)
+def correct_command_word(text: str) -> str:
+    """Apply fuzzy corrections to common misrecognitions."""
+    words = text.split()
+    corrected = []
 
-    # Strip leading command words + optional 'some'
-    stripped = re.sub(
-        r"^(play|put on)(?:\s+some)?\s+",
-        "",
-        text_norm
-    ).strip()
+    for word in words:
+        # Check play fuzzy mappings
+        if word in PLAY_FUZZY:
+            corrected.append(PLAY_FUZZY[word])
+        elif word in STOP_FUZZY:
+            corrected.append(STOP_FUZZY[word])
+        elif word in SKIP_FUZZY:
+            corrected.append(SKIP_FUZZY[word])
+        else:
+            # Check fuzzy match against all play keywords
+            if fuzzy_match_word(word, PLAY_KEYWORDS, threshold=0.8):
+                closest = difflib.get_close_matches(word, PLAY_KEYWORDS, n=1, cutoff=0.8)
+                corrected.append(closest[0] if closest else word)
+            elif fuzzy_match_word(word, STOP_KEYWORDS, threshold=0.8):
+                closest = difflib.get_close_matches(word, STOP_KEYWORDS, n=1, cutoff=0.8)
+                corrected.append(closest[0] if closest else word)
+            elif fuzzy_match_word(word, SKIP_KEYWORDS, threshold=0.8):
+                closest = difflib.get_close_matches(word, SKIP_KEYWORDS, n=1, cutoff=0.8)
+                corrected.append(closest[0] if closest else word)
+            else:
+                corrected.append(word)
 
-    # Strip optional trailing "music"
-    stripped = re.sub(r"\s+music$", "", stripped).strip()
+    result = " ".join(corrected)
+    if result != text:
+        print(f"🔧 Corrected: '{text}' → '{result}'")
+    return result
 
-    print("DEBUG stripped:", stripped)
+# ---------------- Text cleanup ----------------
 
-    # Phrase must be short to be a genre
-    if len(stripped.split()) > 3:
-        return None
+INCIDENTAL_PHRASES = [
+    "i really would like to", "id really like to", "i would like to",
+    "id like to", "i want to", "i wanna", "please", "could you", "can you"
+]
 
-    # Exact match
-    if stripped in KNOWN_GENRES:
-        return stripped
-
-    # Fuzzy match
-    matches = difflib.get_close_matches(
-        stripped,
-        KNOWN_GENRES,
-        n=1,
-        cutoff=0.9
-    )
-
-    return matches[0] if matches else None
-
-# ---------------- Explicit Album Detection ----------------
-
-def detect_album_explicit(text: str) -> tuple[str, str | None] | None:
-    """
-    Detect album requests with optional artist.
-    Returns (album, artist?) or None
-
-    Examples:
-      - play the album aja
-      - play zz tops album greatest hits
-      - play album greatest hits by zz top
-    """
-    if not KNOWN_ALBUMS:
-        return None
-
+def normalize_text(text: str) -> str:
     text = normalize_name(text)
 
-    patterns = [
-        # play zz tops album greatest hits
-        r"(?:play|put on)\s+(?P<artist>[a-z0-9 ]+?)s?\s+album\s+(?P<album>[a-z0-9 ]+)$",
+    # Only correct if FIRST word is in explicit fuzzy dictionaries
+    words = text.split()
+    if words and words[0] in PLAY_FUZZY:
+        words[0] = PLAY_FUZZY[words[0]]
+        text = " ".join(words)
+        print(f"🔧 Corrected: first word to '{words[0]}'")
+    elif words and words[0] in STOP_FUZZY:
+        words[0] = STOP_FUZZY[words[0]]
+        text = " ".join(words)
+        print(f"🔧 Corrected: first word to '{words[0]}'")
+    elif words and words[0] in SKIP_FUZZY:
+        words[0] = SKIP_FUZZY[words[0]]
+        text = " ".join(words)
+        print(f"🔧 Corrected: first word to '{words[0]}'")
 
-        # play album greatest hits by zz top
-        r"(?:play|put on)\s+(?:the\s+)?album\s+(?P<album>[a-z0-9 ]+)\s+by\s+(?P<artist>[a-z0-9 ]+)$",
+    for phrase in INCIDENTAL_PHRASES:
+        text = text.replace(phrase, "")
+    return " ".join(text.split())
 
-        # play album aja
-        r"(?:play|put on)\s+(?:the\s+)?album\s+(?P<album>[a-z0-9 ]+)$",
-    ]
+# ---------------- Slot extraction ----------------
 
-    for p in patterns:
-        m = re.match(p, text)
-        if not m:
-            continue
+def extract_slots(text: str) -> dict:
+    slots = {"album": None, "artist": None, "genre": None, "raw": None}
 
-        album = m.group("album").strip()
-        artist = m.groupdict().get("artist")
+    m = re.search(r"\balbum\s+([a-z0-9 ]+)", text)
+    if m:
+        slots["album"] = m.group(1).strip()
+        return slots
 
-        album_norm = normalize_name(album)
+    m = re.search(r"\bgenre\s+([a-z0-9 ]+)", text)
+    if m:
+        slots["genre"] = m.group(1).strip()
+        return slots
 
-        if album_norm in KNOWN_ALBUMS:
-            return album_norm, artist
+    m = re.search(r"\bby\s+([a-z0-9 ]+)", text)
+    if m:
+        slots["artist"] = m.group(1).strip()
 
-        matches = difflib.get_close_matches(
-            album_norm, KNOWN_ALBUMS, n=1, cutoff=0.75
-        )
-        if matches:
-            return matches[0], artist
+    slots["raw"] = extract_free_text(text)
+    return slots
 
-    return None
-
-# ---------------- Query extraction ----------------
-
-def extract_song_or_artist(text: str) -> str:
-    """
-    Extract song / artist query.
-    Never returns genre or album.
-    """
-    text = re.sub(r"[^\w\s]", " ", text.lower())
-    text = " ".join(text.split())
-
+def extract_free_text(text: str) -> str:
+    # Expanded list to include more filler words
     text = re.sub(
-        r"\b(play|put on|please|i want|i'd like|the|song|music)\b",
+        r"\b(play|put|on|hear|listen|music|song|album|genre|the|by|from|some|a|an|start|queue)\b",
         "",
-        text,
+        text
     )
-
-    return text.strip()
+    return " ".join(text.split())
 
 # ---------------- Playback control ----------------
 
 def stop_current_playback():
-    global player_process
+    """Stop any currently playing track and wait for thread to finish."""
+    global player_process, player_thread
     stop_event.set()
     next_event.set()
-    if player_process and player_process.poll() is None:
-        player_process.terminate()
-    time.sleep(0.2)
+
+    with player_lock:
+        if player_process and player_process.poll() is None:
+            player_process.terminate()
+            player_process = None
+
+    if player_thread and player_thread.is_alive():
+        player_thread.join(timeout=2.0)
+        player_thread = None
+
     stop_event.clear()
     next_event.clear()
 
 def skip_to_next_track():
     global player_process
     next_event.set()
-    if player_process and player_process.poll() is None:
-        player_process.terminate()
+    with player_lock:
+        if player_process and player_process.poll() is None:
+            player_process.terminate()
+            player_process = None
 
 # ---------------- Playback ----------------
 
@@ -178,27 +201,64 @@ def play_tracks(tracks_list):
             break
 
         url = track.get("url")
+        if isinstance(url, list):
+            url = url[0]
+        if not isinstance(url, str):
+            print(f"⚠️ Invalid URL for track: {track}")
+            continue
+
         title = track.get("title", "Unknown")
-        print(f"🎵 Now playing: {title} ({url})")
+        print(f"🎵 Now playing: {title}")
 
         try:
-            player_process = subprocess.Popen([PLAYER_CMD, "-q", url])
-            while player_process.poll() is None:
+            with player_lock:
+                player_process = subprocess.Popen(PLAYER_CMD + [url])
+
+            while True:
+                with player_lock:
+                    proc = player_process
+
+                if proc is None or proc.poll() is not None:
+                    break
+
                 if stop_event.is_set() or next_event.is_set():
-                    player_process.terminate()
+                    with player_lock:
+                        if player_process and player_process.poll() is None:
+                            player_process.terminate()
+                            player_process = None
                     next_event.clear()
                     break
+
                 time.sleep(0.1)
+
         except KeyboardInterrupt:
             break
 
-    player_process = None
+    with player_lock:
+        player_process = None
 
 # ---------------- Backend interaction ----------------
 
-def fetch_playlist(prompt):
-    global tracks
-    stop_current_playback()
+def check_playlist_exists(prompt):
+    """Check if a playlist exists WITHOUT starting playback."""
+    try:
+        res = requests.post(
+            BACKEND_URL,
+            json={"prompt": prompt, "mode": "local", "source": "local"},
+            timeout=10,
+        )
+        if res.status_code == 404:
+            return False, None
+        res.raise_for_status()
+        data = res.json()
+        return bool(data.get("tracks")), data
+    except Exception as e:
+        print(f"⚠️ Error checking playlist: {e}")
+        return False, None
+
+def fetch_playlist(prompt, interrupt=True):
+    """Fetch playlist and START playback."""
+    global tracks, player_thread
 
     try:
         res = requests.post(
@@ -209,119 +269,148 @@ def fetch_playlist(prompt):
 
         if res.status_code == 404:
             return False, None
-
         res.raise_for_status()
         data = res.json()
-        tracks = data.get("tracks", [])
 
-        if not tracks:
-            return False, None
+        new_tracks = data.get("tracks", [])
+        if not new_tracks:
+            return False, data
 
-        threading.Thread(
-            target=play_tracks,
-            args=(tracks,),
-            daemon=True
-        ).start()
+        if interrupt:
+            stop_current_playback()
 
-        return True, tracks
+        tracks = new_tracks
+
+        player_thread = threading.Thread(target=play_tracks, args=(tracks,), daemon=True)
+        player_thread.start()
+
+        return True, data
 
     except Exception as e:
         print(f"⚠️ Error fetching playlist: {e}")
         return False, None
 
-# ---------------- Artist correction ----------------
+# ---------------- Music intent parser ----------------
 
-def suggest_artist_variants(bad_name: str) -> list[str]:
-    COMMON_FIXES = {
-        "stilly dan": ["steely dan"],
-        "air all smith": ["aerosmith"],
-        "errol smith": ["aerosmith"],
-        "corn": ["korn"],
-    }
+def parse_music_prompt(prompt: str) -> dict:
+    """Parse the prompt to determine intent WITHOUT starting playback."""
+    text = normalize_text(prompt)
+    text = re.split(r"[.?!]", text)[0].strip()
+    slots = extract_slots(text)
 
-    bad = normalize_name(bad_name)
-    if bad in COMMON_FIXES:
-        return COMMON_FIXES[bad]
+    if slots["album"]:
+        return {"type": "album", "value": slots["album"], "raw": text}
+    if slots["genre"]:
+        return {"type": "genre", "value": slots["genre"], "raw": text}
+    if slots["artist"]:
+        return {"type": "artist", "value": slots["artist"], "raw": text}
 
-    return [bad.replace(" ", "")]
+    raw = slots["raw"]
+    if not raw:
+        return {"type": "unknown", "value": None, "raw": text}
+
+    # Smart album search: try full match, then partial matches
+    # Try as full album name
+    if check_playlist_exists(f"album:{raw}")[0]:
+        return {"type": "album", "value": raw, "raw": text}
+
+    # Try as partial album name (for albums like "Echoes - The Best of...")
+    # Split on common separators and try first part
+    for separator in [' - ', ': ', ' / ']:
+        if separator in raw:
+            first_part = raw.split(separator)[0].strip()
+            if first_part and check_playlist_exists(f"album:{first_part}")[0]:
+                return {"type": "album", "value": first_part, "raw": text}
+
+    # Try as genre
+    if check_playlist_exists(f"genre:{raw}")[0]:
+        return {"type": "genre", "value": raw, "raw": text}
+
+    # Try as artist
+    if check_playlist_exists(f"artist:{raw}")[0]:
+        return {"type": "artist", "value": raw, "raw": text}
+
+    # Try as song
+    if check_playlist_exists(raw)[0]:
+        return {"type": "song", "value": raw, "raw": text}
+
+    return {"type": "unknown", "value": raw, "raw": text}
 
 # ---------------- Intent interface ----------------
 
 def can_handle(text: str) -> bool:
+    """Enhanced intent detection with fuzzy matching."""
     text = text.lower()
-    return any(k in text for k in ["play", "music", "song", "album", "stop", "pause", "skip", "next"])
+    words = text.split()
+
+    # Direct keyword match
+    for word in words:
+        if word in PLAY_KEYWORDS + STOP_KEYWORDS + SKIP_KEYWORDS:
+            return True
+        if word in PLAY_FUZZY or word in STOP_FUZZY or word in SKIP_FUZZY:
+            return True
+        # Fuzzy match
+        if (fuzzy_match_word(word, PLAY_KEYWORDS, 0.75) or
+            fuzzy_match_word(word, STOP_KEYWORDS, 0.75) or
+            fuzzy_match_word(word, SKIP_KEYWORDS, 0.75)):
+            return True
+
+    # Fallback to general music keywords
+    return any(k in text for k in ["music", "song", "album"])
 
 def handle(text: str):
-    global KNOWN_GENRES, KNOWN_ALBUMS
-
+    global LAST_PLAY_TIME
     now = time.time()
     if now - LAST_PLAY_TIME < INTENT_COOLDOWN:
         return None
 
-    # Load genres + albums
-    try:
-        if not KNOWN_GENRES:
-            g = requests.get("http://localhost:8000/genres", timeout=5).json()
-            KNOWN_GENRES = [normalize_name(x) for x in g.get("genres", [])]
-            print(f"🎼 Loaded {len(KNOWN_GENRES)} genres")
-
-        if not KNOWN_ALBUMS:
-            a = requests.get("http://localhost:8000/albums", timeout=5).json()
-            KNOWN_ALBUMS = [normalize_name(x) for x in a.get("albums", [])]
-            print(f"💿 Loaded {len(KNOWN_ALBUMS)} albums")
-
-    except Exception as e:
-        print(f"⚠️ Failed loading metadata: {e}")
-
-    text = text.lower().strip()
-
-    for w in ["hey computer", "hey, computer", "computer"]:
-        text = text.replace(w, " ")
-
+    text = normalize_text(text)
     text = re.split(r"[.?!]", text)[0].strip()
 
-    # Stop / skip
-    if any(w in text for w in ["stop", "pause", "shut up"]):
-        stop_current_playback()
-        return "Music stopped."
+    # Check for stop/pause commands
+    words = text.split()
+    for word in words:
+        if word in STOP_KEYWORDS or word in STOP_FUZZY or fuzzy_match_word(word, STOP_KEYWORDS, 0.75):
+            stop_current_playback()
+            return "Music stopped."
 
-    if any(w in text for w in ["next", "skip"]):
-        skip_to_next_track()
-        return "Skipping to the next track."
+    # Check for skip commands
+    for word in words:
+        if word in SKIP_KEYWORDS or word in SKIP_FUZZY or fuzzy_match_word(word, SKIP_KEYWORDS, 0.75):
+            skip_to_next_track()
+            return "Skipping to the next track."
 
-    # 1 Album (strongest intent)
-    album_data = detect_album_explicit(text)
-    if album_data:
-        album, artist = album_data
+    intent = parse_music_prompt(text)
+    print("🎯 MUSIC INTENT:", intent)
 
-        query = f"album:{album}"
-        if artist:
-            query += f" by {artist}"
+    t = intent["type"]
+    v = intent.get("value")
 
-        print(f"💿 Album intent detected: album={album}, artist={artist}")
+    if t in ["album", "artist", "genre", "song"]:
+        tag = f"{t}:{v}" if t in ["album", "artist", "genre"] else v
+        success, returned_data = fetch_playlist(tag, interrupt=True)
+        if success and returned_data:
+            matched_value = returned_data.get("matched", {}).get("value", v)
+            if t == "album":
+                return f"Playing the album {matched_value}"
+            elif t == "artist":
+                return f"Playing music by {matched_value}"
+            elif t == "genre":
+                return f"Playing some {matched_value} music"
+            else:
+                return f"Playing {matched_value}"
+        else:
+            if t == "album":
+                return f"Sorry, I couldn't find the album {v}"
+            elif t == "artist":
+                return f"Sorry, I couldn't find music by {v}"
+            elif t == "genre":
+                return f"Sorry, I couldn't find any {v} music"
+            else:
+                return f"Sorry, I couldn't find the song {v}"
 
-        success, _ = fetch_playlist(query)
-        if success:
-            return f"Playing the album {album}"
-        return f"Sorry, I couldn’t find the album {album}"
+    if t == "ambiguous":
+        opts = ", ".join(intent.get("candidates", []))
+        return f"I found multiple matches for {v}. Did you mean the {opts}?"
 
-    # 2 Genre
-    genre = detect_genre_explicit(text)
-    print("DEBUG: ", genre)
-    if genre:
-        query = f"genre:{genre}"
-        print(f"🎼 Genre intent detected: {genre}")
-        success, _ = fetch_playlist(query)
-        if success:
-            return f"Playing some {genre} music."
-        return f"Sorry, I couldn’t find any {genre} music."
-
-    # 3 Song / artist
-    song_query = extract_song_or_artist(text)
-    if song_query:
-        print(f"🎶 Music intent detected: {song_query}")
-        success, _ = fetch_playlist(song_query)
-        if success:
-            return f"Playing {song_query}"
-
-    return "Sorry, I couldn’t find that music."
+    return "Sorry, I couldn't figure out what music you wanted."

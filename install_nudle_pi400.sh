@@ -22,12 +22,7 @@ sudo apt install -y \
   espeak \
   mpg123 \
   git \
-  curl \
-  libatlas-base-dev \
-  libffi-dev \
-  libssl-dev \
-  libsndfile1 \
-  libopenblas-dev
+  curl 
 
 # -----------------------------
 # Python virtual environment

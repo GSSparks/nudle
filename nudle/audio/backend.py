@@ -1,5 +1,3 @@
-# audio/backend.py
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -18,8 +16,8 @@ from threading import Lock
 
 # ---------------- Configuration ----------------
 
-LOCAL_MUSIC_DIR = "/mnt/server/Music"
-INDEX_FILE = "music_index.json"
+LOCAL_MUSIC_DIR = "/home/gsparks/server/Music"
+INDEX_FILE = "/tmp/music_index.json"
 
 # ---------------- Globals ----------------
 
@@ -43,8 +41,6 @@ app.add_middleware(
 
 class Prompt(BaseModel):
     prompt: str
-    mode: str = "local"
-    source: str = "local"
 
 # ---------------- Helpers ----------------
 
@@ -59,31 +55,11 @@ def snapshot_index():
     with INDEX_LOCK:
         return list(LIB_INDEX)
 
-def save_index():
-    with INDEX_LOCK:
-        with open(INDEX_FILE, "w", encoding="utf-8") as f:
-            json.dump(LIB_INDEX, f, ensure_ascii=False, indent=2)
-
-def load_index() -> bool:
-    global LIB_INDEX
-    if not os.path.exists(INDEX_FILE):
-        return False
-    try:
-        with open(INDEX_FILE, "r", encoding="utf-8") as f:
-            LIB_INDEX = json.load(f)
-        print(f"📀 Loaded {len(LIB_INDEX)} tracks")
-        return True
-    except Exception as e:
-        print("❌ Index load failed:", e)
-        return False
-
 # ---------------- Metadata ----------------
 
 def get_track_metadata(path: str) -> dict:
     title = os.path.splitext(os.path.basename(path))[0]
-    artist = ""
-    album = ""
-    genre = ""
+    artist = album = genre = ""
 
     try:
         m = MutagenFile(path, easy=True)
@@ -104,29 +80,13 @@ def get_track_metadata(path: str) -> dict:
         "key": f"{normalize(title)} - {normalize(artist)}".strip(" -"),
     }
 
-def available_genres():
-    return sorted({
-        normalize(e["genre"])
-        for e in snapshot_index()
-        if e.get("genre")
-    })
-
-def available_albums():
-    return sorted({
-        normalize(e["album"])
-        for e in snapshot_index()
-        if e.get("album")
-    })
-
 # ---------------- Indexing ----------------
 
 def background_index_library():
     global INDEXING
     if INDEXING:
         return
-
     INDEXING = True
-    print("🎧 Background indexing started")
 
     files = glob.glob(
         os.path.join(LOCAL_MUSIC_DIR, "**", "*.mp3"),
@@ -137,168 +97,94 @@ def background_index_library():
         existing = {e["path"] for e in LIB_INDEX}
 
     for path in files:
-        if path in existing:
-            continue
-        meta = get_track_metadata(path)
-        with INDEX_LOCK:
-            LIB_INDEX.append(meta)
+        if path not in existing:
+            LIB_INDEX.append(get_track_metadata(path))
 
-    save_index()
+    with open(INDEX_FILE, "w") as f:
+        json.dump(LIB_INDEX, f, indent=2)
+
     INDEXING = False
     print(f"✅ Indexed {len(LIB_INDEX)} tracks")
 
-# ---------------- Search ----------------
+# ---------------- Search helpers ----------------
 
-def find_local_track(query: str, cutoff=0.65):
+def resolve_exact_or_fuzzy(values, q, cutoff):
+    if q in values:
+        return q
+    m = difflib.get_close_matches(q, values, n=1, cutoff=cutoff)
+    return m[0] if m else None
+
+def find_by_field(field, query, cutoff=0.7):
     q = normalize(query)
     index = snapshot_index()
 
-    # 1️⃣ Exact title match
-    exact = [
-        e["path"]
+    values = list({
+        normalize(e[field])
         for e in index
-        if normalize(e.get("title")) == q
-    ]
-    if exact:
-        return exact
-
-    # 2️⃣ Exact key match (title - artist)
-    exact_key = [
-        e["path"]
-        for e in index
-        if e.get("key") == q
-    ]
-    if exact_key:
-        return exact_key
-
-    # 3️⃣ Fuzzy title match
-    titles = [normalize(e.get("title")) for e in index]
-    matches = difflib.get_close_matches(q, titles, n=1, cutoff=cutoff)
-    if matches:
-        return [
-            e["path"]
-            for e in index
-            if normalize(e.get("title")) == matches[0]
-        ]
-
-    # 4️⃣ Fuzzy key match
-    keys = [e["key"] for e in index]
-    matches = difflib.get_close_matches(q, keys, n=1, cutoff=cutoff)
-    if matches:
-        return [
-            e["path"]
-            for e in index
-            if e["key"] == matches[0]
-        ]
-
-    return []
-
-def find_local_album(album_query: str, cutoff=0.7):
-    q = normalize(album_query)
-    index = snapshot_index()
-
-    exact = [
-        e["path"]
-        for e in index
-        if normalize(e.get("album")) == q
-    ]
-    if exact:
-        return sorted(exact)
-
-    albums = available_albums()
-    close = difflib.get_close_matches(q, albums, n=1, cutoff=cutoff)
-    if close:
-        return sorted(
-            e["path"]
-            for e in index
-            if normalize(e.get("album")) == close[0]
-        )
-
-    return []
-
-def find_local_artist(artist_query: str, cutoff=0.7):
-    q = normalize(artist_query)
-    index = snapshot_index()
-
-    exact = [
-        e["path"]
-        for e in index
-        if normalize(e.get("artist")) == q
-    ]
-    if exact:
-        return sorted(exact)
-
-    artists = list({
-        normalize(e.get("artist"))
-        for e in index
-        if e.get("artist")
+        if e.get(field)
     })
 
-    close = difflib.get_close_matches(q, artists, n=1, cutoff=cutoff)
-    if close:
-        return sorted(
-            e["path"]
-            for e in index
-            if normalize(e.get("artist")) == close[0]
-        )
+    # First try exact match
+    if q in values:
+        match = q
+    else:
+        # Try fuzzy match
+        matches = difflib.get_close_matches(q, values, n=1, cutoff=cutoff)
+        if matches:
+            match = matches[0]
+        else:
+            # NEW: Try partial match - find albums that CONTAIN the query
+            partial_matches = [v for v in values if q in v or v in q]
+            if partial_matches:
+                # Sort by length - prefer shorter matches (more specific)
+                match = sorted(partial_matches, key=len)[0]
+            else:
+                return None, []
 
-    return []
-
-def find_local_genre(genre_query: str, cutoff=0.6):
-    q = normalize(genre_query)
-    index = snapshot_index()
-
-    exact = [
+    tracks = sorted(
         e["path"]
         for e in index
-        if normalize(e.get("genre")) == q
-    ]
-    if exact:
-        return exact
-
-    genres = available_genres()
-    close = difflib.get_close_matches(q, genres, n=1, cutoff=cutoff)
-    if close:
-        return [
-            e["path"]
-            for e in index
-            if normalize(e.get("genre")) == close[0]
-        ]
-
-    return []
+        if normalize(e[field]) == match
+    )
+    return match, tracks
 
 # ---------------- Routes ----------------
 
 @app.post("/playlist")
 def create_playlist(data: Prompt):
     prompt = data.prompt.strip()
-
-    if prompt.lower().startswith("album:"):
-        album = prompt.split(":", 1)[1]
-        tracks = find_local_album(album)
+    matched = None
+    tracks = []
+    print("DEBUG: ", prompt)
+    if prompt.startswith("album:"):
+        matched, tracks = find_by_field("album", prompt[6:])
         if not tracks:
-            raise HTTPException(404, f"Album '{album}' not found")
+            raise HTTPException(404, "Album not found")
+        random.shuffle(tracks)
 
-    elif prompt.lower().startswith("genre:"):
-        genre = prompt.split(":", 1)[1]
-        tracks = find_local_genre(genre)
+    elif prompt.startswith("artist:"):
+        matched, tracks = find_by_field("artist", prompt[7:])
         if not tracks:
-            raise HTTPException(404, f"No '{genre}' music found")
+            raise HTTPException(404, "Artist not found")
+        random.shuffle(tracks)
+
+    elif prompt.startswith("genre:"):
+        matched, tracks = find_by_field("genre", prompt[6:], cutoff=0.6)
+        if not tracks:
+            raise HTTPException(404, "Genre not found")
         random.shuffle(tracks)
 
     else:
-        m = re.search(r"\bby\s+(.+)$", prompt, re.I)
-        if m:
-            tracks = find_local_artist(m.group(1))
-            if not tracks:
-                raise HTTPException(404, "Artist not found")
-            random.shuffle(tracks)
-        else:
-            tracks = find_local_track(prompt)
-            if not tracks:
-                raise HTTPException(404, f"Couldn't find '{prompt}'")
+        # Song fallback ONLY
+        matched, tracks = find_by_field("title", prompt, cutoff=0.65)
+        if not tracks:
+            raise HTTPException(404, "Song not found")
 
     return {
+        "matched": {
+            "type": prompt.split(":", 1)[0] if ":" in prompt else "song",
+            "value": matched,
+        },
         "tracks": [
             {
                 "title": os.path.basename(p),
@@ -314,24 +200,15 @@ def create_playlist(data: Prompt):
 def serve_local_mp3(path: str):
     decoded = unquote(path)
     safe = os.path.normpath(decoded).lstrip("/")
-    if safe.startswith(".."):
-        raise HTTPException(400, "Invalid path")
-
     full = os.path.join(LOCAL_MUSIC_DIR, safe)
     if not os.path.isfile(full):
-        raise HTTPException(404, "File not found")
-
+        raise HTTPException(404)
     return StreamingResponse(open(full, "rb"), media_type="audio/mpeg")
-
-@app.get("/genres")
-def list_genres():
-    return {"genres": available_genres()}
-
-@app.get("/albums")
-def list_albums():
-    return {"albums": available_albums()}
 
 # ---------------- Startup ----------------
 
-if not load_index():
+if os.path.exists(INDEX_FILE):
+    with open(INDEX_FILE) as f:
+        LIB_INDEX = json.load(f)
+else:
     threading.Thread(target=background_index_library, daemon=True).start()
