@@ -3,7 +3,6 @@ import torch
 import numpy as np
 import torchaudio
 
-# Compatibility shim for older pyannote expectations
 if not hasattr(torchaudio, "AudioMetaData"):
     class AudioMetaData:
         pass
@@ -14,16 +13,18 @@ class SpeakerEmbedder:
     def __init__(self, device="cpu"):
         self.device = device
 
-        # Load locally downloaded pyannote embedding model
         self.model = Model.from_pretrained(
             local_dir="./models/pyannote_embedding",
             checkpoint="./models/pyannote_embedding/pytorch_model.bin",
-            strict=False,  # avoids warnings about old training versions
+            strict=False,
         ).to(device).eval()
 
-    def embed(self, wav_path: str) -> np.ndarray:
-        # Load audio
+    def embed(self, wav_path: str, debug=False) -> np.ndarray:
+        """Generate speaker embedding with strict shape control."""
         waveform, sr = torchaudio.load(wav_path)
+
+        if debug:
+            print(f"   Audio: {waveform.shape}, sample_rate={sr}")
 
         # Convert multi-channel → mono
         if waveform.shape[0] > 1:
@@ -38,9 +39,16 @@ class SpeakerEmbedder:
         with torch.no_grad():
             embedding = self.model(waveform)
 
-        # 🔑 CRITICAL FIX:
-        # Force output to strictly 1D (embedding_dim,)
-        embedding = embedding.squeeze().reshape(-1)
-        embedding = embedding / np.linalg.norm(embedding)
+        # CRITICAL: Force to 1D numpy array
+        embedding = embedding.cpu().numpy()
+        embedding = embedding.flatten()  # Ensure 1D
 
-        return embedding.cpu().numpy()
+        if debug:
+            print(f"   Embedding shape: {embedding.shape}, norm: {np.linalg.norm(embedding):.3f}")
+
+        # Normalize to unit vector
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+
+        return embedding
