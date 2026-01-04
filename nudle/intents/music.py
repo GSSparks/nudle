@@ -9,7 +9,7 @@ import difflib
 
 # ---------------- Globals ----------------
 
-PLAYER_CMD = ["mpg123", "-q"]
+PLAYER_CMD = ["mpv", "--quiet", "--no-video"]
 BACKEND_URL = "http://localhost:8000/playlist"
 
 tracks = []
