@@ -23,3 +23,5 @@ piper-tts>=0.1.0
 
 # Optional: utilities for intents / time handling
 pytz>=2023.3
+
+librosa

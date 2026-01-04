@@ -65,7 +65,8 @@ whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 openwakeword.utils.download_models()
 
 ow_model = Model(
-    wakeword_models=["/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx"],
+    #wakeword_models=["/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx"],
+    wakeword_models=["hey jarvis"],
     enable_speex_noise_suppression=False,
     vad_threshold=0.6,
     inference_framework="onnx",

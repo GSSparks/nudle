@@ -9,7 +9,7 @@ from intents import radio
 # Path to your Piper voice
 VOICE_PATH = os.environ.get(
     "PIPER_VOICE",
-    "tts/voices/en_US-lessac-medium.onnx"
+    "tts/voices/en_US-hfc_female-medium.onnx"
 )
 
 PIPER_BIN = shutil.which("piper")

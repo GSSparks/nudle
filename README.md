@@ -24,10 +24,13 @@ It listens continuously, wakes on a wake word, and responds to spoken commands u
 ## Tech Stack
 
 - `Python 3.11`
+- `OpenWakeWord`
 - `sounddevice` + `PortAudio`
 - `Whisper` (faster-whisper)
+- `pyannote-audio`
 - `WebRTC VAD`
 - `Piper TTS`
+- `mpv`
 
 
 ## Status
