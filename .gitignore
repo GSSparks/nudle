@@ -6,3 +6,6 @@ nudle/models/
 nudle/speaker/__pycache__
 nudle/tts/__pycache__
 nudle/tts/voices
+.venv/
+nudle311/
+.claude-account

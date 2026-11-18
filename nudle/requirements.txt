@@ -25,3 +25,7 @@ piper-tts>=0.1.0
 pytz>=2023.3
 
 librosa
+
+# Backend
+fastapi
+mutagen

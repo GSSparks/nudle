@@ -5,6 +5,7 @@ import time
 import threading
 import subprocess
 from datetime import datetime, timedelta
+from tts import speak as tts_speak
 
 # ---------------- Globals ----------------
 
@@ -18,9 +19,6 @@ DEFAULT_ALARM_SOUND = "../assets/lo-fi-alarm-clock-243766.mp3"  # Replace with y
 ALARM_PLAYER = "mpg123"  # or "mpv"
 
 # ---------------- Helpers ----------------
-
-def speak(text: str):
-    print(f"🗣️ {text}")
 
 def now_str():
     return datetime.now().strftime("%-I:%M %p")
@@ -44,7 +42,7 @@ def timer_thread(start: float, duration: int):
         if timer_cancel_event.is_set():
             return
         time.sleep(0.2)
-    speak("⏲️ Timer finished.")
+    tts_speak("Timer finished.")
 
 def set_timer(seconds: int):
     timer_cancel_event.clear()
@@ -95,13 +93,12 @@ def timer_remaining():
 def alarm_thread(target: datetime, sound_file: str = DEFAULT_ALARM_SOUND):
     while not alarm_cancel_event.is_set():
         if datetime.now() >= target:
-            speak("⏰ Alarm going off.")
+            tts_speak("Alarm going off.")
             if sound_file and os.path.isfile(sound_file):
                 try:
-                    # Play sound using system audio player
                     subprocess.Popen([ALARM_PLAYER, "-q", sound_file])
                 except Exception as e:
-                    speak(f"Failed to play alarm sound: {e}")
+                    tts_speak(f"Failed to play alarm sound: {e}")
             return
         time.sleep(5)
 

@@ -191,6 +191,10 @@ def skip_to_next_track():
 # ---------------- Playback ----------------
 
 def play_tracks(tracks_list):
+    """
+    Play a list of tracks using mpg123. Automatically handles URL prepending
+    and thread-safe playback control.
+    """
     global current_index, player_process, LAST_PLAY_TIME
     stop_event.clear()
     next_event.clear()
@@ -200,6 +204,7 @@ def play_tracks(tracks_list):
         if stop_event.is_set():
             break
 
+        # Get URL and ensure it's fully qualified
         url = track.get("url")
         if isinstance(url, list):
             url = url[0]
@@ -207,8 +212,16 @@ def play_tracks(tracks_list):
             print(f"⚠️ Invalid URL for track: {track}")
             continue
 
+        # Prepend backend host if URL is relative
+        if url.startswith("/local"):
+            url = f"http://localhost:8000{url}"
+
+        # Escape any spaces or special chars for mpg123
+        url = url.replace(" ", "%20")
+
         title = track.get("title", "Unknown")
-        print(f"🎵 Now playing: {title}")
+        print(f"🎵 Now playing: {title} -> {url}")
+        print(url)
 
         try:
             with player_lock:
@@ -237,6 +250,7 @@ def play_tracks(tracks_list):
     with player_lock:
         player_process = None
 
+
 # ---------------- Backend interaction ----------------
 
 def check_playlist_exists(prompt):
@@ -244,7 +258,7 @@ def check_playlist_exists(prompt):
     try:
         res = requests.post(
             BACKEND_URL,
-            json={"prompt": prompt, "mode": "local", "source": "local"},
+            json={"prompt": prompt},
             timeout=10,
         )
         if res.status_code == 404:
@@ -263,7 +277,7 @@ def fetch_playlist(prompt, interrupt=True):
     try:
         res = requests.post(
             BACKEND_URL,
-            json={"prompt": prompt, "mode": "local", "source": "local"},
+            json={"prompt": prompt},
             timeout=10,
         )
 

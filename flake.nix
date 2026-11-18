@@ -1,5 +1,5 @@
 {
-  description = "reson-voice dev environment (VAD + Whisper + audio)";
+  description = "Nüdle dev environment (VAD + Whisper + audio)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
@@ -10,51 +10,56 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-
-        python = pkgs.python311.withPackages (ps: with ps; [
-          faster-whisper
-          webrtcvad
-          sounddevice
-          numpy
-          scipy
-          requests
-          setuptools
-          pyttsx3
-          uvicorn
-          fastapi
-          mutagen
-          watchdog
-        ]);
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "reson-voice-dev";
+          name = "nudle-voice-dev";
 
           packages = with pkgs; [
-            python
+            # Python (bare, venv-friendly)
+            python311
+            python311Packages.pip
+            python311Packages.virtualenv
+            python311Packages.setuptools
+            python311Packages.wheel
 
-            # Audio + STT native deps
+            # Native deps for audio + ML
             portaudio
+            libffi
             ffmpeg
             alsa-utils
             espeak-classic
             mpg123
             piper-tts
 
+            # CUDA userspace libs (needed for torch wheels)
+            #cudaPackages.cudatoolkit
+            #cudaPackages.cudnn
+
             # Utilities
             git
             curl
+            pkg-config
           ];
 
           shellHook = ''
-            echo "🎙️ reson-voice dev shell loaded"
+            echo "🎙️ Nüdle-voice dev shell loaded"
             echo "🐍 $(python --version)"
-            echo "🧠 Whisper: tiny.en (CPU)"
-            echo "🔊 Audio stack ready (ALSA + PortAudio)"
 
-            # Use Python-only TFLite runtime for pyopen-wakeword
+            # Wake word config
             export OPENWAKEWORD_USE_PYTHON_TFLITE=1
-            export LD_LIBRARY_PATH=${pkgs.espeak-classic}/lib:$LD_LIBRARY_PATH
+
+            # Native libs
+            export LD_LIBRARY_PATH=${pkgs.portaudio}/lib:${pkgs.libffi}/lib:${pkgs.espeak-classic}/lib:$LD_LIBRARY_PATH
+
+            # Auto-create venv if missing
+            if [ ! -d .venv ]; then
+              echo "📦 Creating Python venv"
+              python -m venv .venv
+            fi
+
+            source .venv/bin/activate
+            echo "✅ venv activated: $(which python)"
           '';
         };
       }

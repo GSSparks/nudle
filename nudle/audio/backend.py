@@ -18,6 +18,7 @@ from threading import Lock
 
 LOCAL_MUSIC_DIR = "/home/gsparks/server/Music"
 INDEX_FILE = "/tmp/music_index.json"
+PI_HOST = "192.168.1.213:8000"  # LAN IP + port
 
 # ---------------- Globals ----------------
 
@@ -27,7 +28,7 @@ INDEXING = False
 
 # ---------------- App ----------------
 
-app = FastAPI(title="Reson-Voice Music Backend")
+app = FastAPI(title="Nudle Music Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -156,6 +157,7 @@ def create_playlist(data: Prompt):
     matched = None
     tracks = []
     print("DEBUG: ", prompt)
+
     if prompt.startswith("album:"):
         matched, tracks = find_by_field("album", prompt[6:])
         if not tracks:
@@ -188,11 +190,12 @@ def create_playlist(data: Prompt):
         "tracks": [
             {
                 "title": os.path.basename(p),
-                "url": f"http://localhost:8000/local/{quote(os.path.relpath(p, LOCAL_MUSIC_DIR))}",
+                "url": f"http://{PI_HOST}/local/{quote(os.path.relpath(p, LOCAL_MUSIC_DIR))}",
             }
             for p in tracks
         ]
     }
+
 
 # ---------------- Static MP3 ----------------
 
