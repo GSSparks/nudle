@@ -1,4 +1,4 @@
-![nudle logo](images/nudle.png)
+![nudle](images/Nudle_Privacy-First Smart_Speaker.png)
 
 **Nüdle** (pronounced *"noo-dle"*, with a German **ü**) is a local, privacy-first voice assistant designed to run entirely on your own hardware.
 
