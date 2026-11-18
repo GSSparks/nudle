@@ -23,10 +23,10 @@ def _fetch_weather(timeframe: str, location: str) -> str:
     # Explicit units: u=m gives Fahrenheit/mph
     if timeframe == "tomorrow":
         fmt = "%C%t%w"
-        url = f"{WTTR_BASE}/{location}?u\&format={fmt}&day=1"
+        url = f"{WTTR_BASE}/{location}?u&format={fmt}&day=1"
     else:
         fmt = "%C%t"
-        url = f"{WTTR_BASE}/{location}?u\&format={fmt}"
+        url = f"{WTTR_BASE}/{location}?u&format={fmt}"
 
     r = requests.get(url, timeout=10)
     r.raise_for_status()

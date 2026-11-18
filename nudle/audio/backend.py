@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -16,9 +17,9 @@ from threading import Lock
 
 # ---------------- Configuration ----------------
 
-LOCAL_MUSIC_DIR = "/home/gsparks/server/Music"
+LOCAL_MUSIC_DIR = os.environ.get("NUDLE_MUSIC_DIR", "/mnt/server/Music")
 INDEX_FILE = "/tmp/music_index.json"
-PI_HOST = "192.168.1.213:8000"  # LAN IP + port
+PI_HOST = os.environ.get("NUDLE_HOST", "localhost:8000")
 
 # ---------------- Globals ----------------
 

@@ -28,6 +28,7 @@
             libsndfile       # soundfile Python package
             libffi
             ffmpeg
+            pipewire         # ALSA plugin so all audio routes through PipeWire
             alsa-utils       # provides aplay (used by Piper TTS output)
             espeak-classic   # TTS fallback binary
             mpg123           # alarm sound playback
@@ -47,8 +48,14 @@
             pkgs.libsndfile
             pkgs.libffi
             pkgs.espeak-classic
+            pkgs.zlib
             pkgs.stdenv.cc.cc.lib  # libstdc++ for torch / torchaudio wheels
           ];
+
+          # Point ALSA at the PipeWire plugin so mic/speaker use system routing.
+          # This silences the "cannot open pipewire.so" errors and lets sounddevice
+          # + aplay honour whatever input/output you have selected in PipeWire.
+          ALSA_PLUGIN_DIR = "${pkgs.pipewire}/lib/alsa-lib";
 
           shellHook = ''
             echo "🎙️  Nüdle dev shell"
@@ -56,6 +63,11 @@
 
             # Wake word backend
             export OPENWAKEWORD_USE_PYTHON_TFLITE=1
+
+            # Pin to the Nix piper binary so the venv's Python piper-tts package
+            # doesn't shadow it (the Python one requires numpy/onnxruntime and
+            # has native lib issues inside the venv).
+            export PIPER_BIN="${pkgs.piper-tts}/bin/piper"
 
             # ── venv ──────────────────────────────────────────────────────────
             if [ ! -d .venv ]; then
@@ -78,17 +90,12 @@
 
             # ── runtime model checks ──────────────────────────────────────────
             MISSING=0
-            if [ ! -f "nudle/assets/Hey_Noodle.onnx" ]; then
-              echo "⚠️  Missing wake word model: nudle/assets/Hey_Noodle.onnx"
-              MISSING=1
-            fi
             if [ ! -f "nudle/models/pyannote_embedding/pytorch_model.bin" ]; then
               echo "⚠️  Missing speaker model: nudle/models/pyannote_embedding/pytorch_model.bin"
               MISSING=1
             fi
             if [ ! -f "nudle/tts/voices/en_US-lessac-medium.onnx" ]; then
               echo "⚠️  Missing TTS voice: nudle/tts/voices/en_US-lessac-medium.onnx"
-              echo "    Download with: piper --download-voice en_US-lessac-medium"
               MISSING=1
             fi
             [ "$MISSING" -eq 0 ] && echo "✅ All model files present"

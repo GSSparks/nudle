@@ -17,10 +17,6 @@ pyannote.audio==3.1.1
 sounddevice>=0.4.7
 numpy<2.0,>=1.25.0
 
-# TTS (Piper)
-# If you use another TTS, adjust accordingly
-piper-tts>=0.1.0
-
 # Optional: utilities for intents / time handling
 pytz>=2023.3
 

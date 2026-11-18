@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+import warnings
 import queue
 import sounddevice as sd
 import numpy as np
@@ -9,6 +11,8 @@ import librosa
 from scipy import signal
 
 from faster_whisper import WhisperModel
+
+warnings.filterwarnings("ignore", message="torchaudio._backend.set_audio_backend")
 
 # --- Local imports ---
 from tts import speak
@@ -351,13 +355,42 @@ def main():
 
     # ---------------- Audio device detection ----------------
     input_device = None
-    for i, dev in enumerate(sd.query_devices()):
-        if dev["max_input_channels"] > 0:
-            print(f"Input device #{i}: {dev['name']}")
+
+    # Manual override via env var: NUDLE_INPUT_DEVICE=6
+    env_device = os.environ.get("NUDLE_INPUT_DEVICE")
+    if env_device is not None:
+        input_device = int(env_device)
+        print(f"🎤 Using device #{input_device} (NUDLE_INPUT_DEVICE override)")
+    else:
+        input_devices = [(i, dev) for i, dev in enumerate(sd.query_devices()) if dev["max_input_channels"] > 0]
+        for i, dev in input_devices:
+            print(f"  Input #{i}: {dev['name']}")
+
+        # Priority 1: WM8960 HAT (Raspberry Pi target hardware)
+        for i, dev in input_devices:
             if "wm8960" in dev["name"].lower():
                 input_device = i
-    if input_device is None:
-        print("⚠️ Waveshare WM8960 not found, using default input")
+                print(f"🎤 Selected WM8960 HAT (#{i})")
+                break
+
+        # Priority 2: PipeWire default (None) — handles rate conversion automatically
+        if input_device is None:
+            try:
+                sd.check_input_settings(device=None, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
+                print("🎤 Using PipeWire default input")
+            except Exception:
+                # Priority 3: First numbered device that accepts 16 kHz directly
+                for i, dev in input_devices:
+                    try:
+                        sd.check_input_settings(device=i, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
+                        input_device = i
+                        print(f"🎤 Selected #{i}: {dev['name']}")
+                        break
+                    except Exception:
+                        continue
+
+                if input_device is None:
+                    print("⚠️ No device found supporting 16 kHz — set NUDLE_INPUT_DEVICE=<n> to pick one manually")
 
     with sd.InputStream(
         device=input_device,

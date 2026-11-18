@@ -2,25 +2,38 @@ from pyannote.audio import Model
 import torch
 import numpy as np
 import torchaudio
+import os
 
 if not hasattr(torchaudio, "AudioMetaData"):
     class AudioMetaData:
         pass
     torchaudio.AudioMetaData = AudioMetaData
 
+CHECKPOINT = os.path.join(os.path.dirname(__file__), "..", "models", "pyannote_embedding", "pytorch_model.bin")
+
 
 class SpeakerEmbedder:
     def __init__(self, device="cpu"):
         self.device = device
+        self.model = None
 
-        self.model = Model.from_pretrained(
-            local_dir="./models/pyannote_embedding",
-            checkpoint="./models/pyannote_embedding/pytorch_model.bin",
-            strict=False,
-        ).to(device).eval()
+        checkpoint = os.path.normpath(CHECKPOINT)
+        if not os.path.exists(checkpoint):
+            print(f"⚠️ Speaker model not found: {checkpoint}")
+            print("   Speaker recognition disabled. See README to download the model.")
+            return
 
-    def embed(self, wav_path: str, debug=False) -> np.ndarray:
+        try:
+            self.model = Model.from_pretrained(checkpoint, strict=False).to(device).eval()
+            print("✅ Speaker embedding model loaded")
+        except Exception as e:
+            print(f"⚠️ Failed to load speaker model: {e}")
+            print("   Speaker recognition disabled.")
+
+    def embed(self, wav_path: str, debug=False):
         """Generate speaker embedding with strict shape control."""
+        if self.model is None:
+            return None
         waveform, sr = torchaudio.load(wav_path)
 
         if debug:
