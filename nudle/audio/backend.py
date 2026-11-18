@@ -18,7 +18,7 @@ from threading import Lock
 # ---------------- Configuration ----------------
 
 LOCAL_MUSIC_DIR = os.environ.get("NUDLE_MUSIC_DIR", "/mnt/server/Music")
-INDEX_FILE = "/tmp/music_index.json"
+INDEX_FILE = os.path.join(os.path.expanduser("~"), ".nudle", "music_index.json")
 PI_HOST = os.environ.get("NUDLE_HOST", "localhost:8000")
 
 # ---------------- Globals ----------------
@@ -102,6 +102,7 @@ def background_index_library():
         if path not in existing:
             LIB_INDEX.append(get_track_metadata(path))
 
+    os.makedirs(os.path.dirname(INDEX_FILE), exist_ok=True)
     with open(INDEX_FILE, "w") as f:
         json.dump(LIB_INDEX, f, indent=2)
 
