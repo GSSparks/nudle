@@ -40,15 +40,22 @@
             curl
           ];
 
+          # Set library path before the shell hook runs so Python wheels
+          # find native libs (portaudio, libsndfile, etc.) via ctypes.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.portaudio
+            pkgs.libsndfile
+            pkgs.libffi
+            pkgs.espeak-classic
+            pkgs.stdenv.cc.cc.lib  # libstdc++ for torch / torchaudio wheels
+          ];
+
           shellHook = ''
             echo "🎙️  Nüdle dev shell"
             echo "🐍 $(python3 --version)"
 
             # Wake word backend
             export OPENWAKEWORD_USE_PYTHON_TFLITE=1
-
-            # Expose native libs to Python wheels
-            export LD_LIBRARY_PATH=${pkgs.portaudio}/lib:${pkgs.libsndfile}/lib:${pkgs.libffi}/lib:${pkgs.espeak-classic}/lib:$LD_LIBRARY_PATH
 
             # ── venv ──────────────────────────────────────────────────────────
             if [ ! -d .venv ]; then
