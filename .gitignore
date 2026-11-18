@@ -1,3 +1,4 @@
+.env
 nudle/__pycache__
 nudle/assets/
 nudle/audio/__pycache__
