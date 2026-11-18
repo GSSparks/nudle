@@ -62,6 +62,8 @@ last_wake_time = 0
 last_interaction_time = 0
 tts_active = False
 
+VAD_THRESHOLD = 0.15  # calibrated at startup
+
 # ---------------- Models ----------------
 
 whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
@@ -158,7 +160,7 @@ def detect_speech_segments(audio, sample_rate=16000, frame_length=0.025, frame_s
     speech_frames = np.sum(frames > threshold)
     speech_ratio = speech_frames / len(frames)
 
-    has_speech = speech_ratio > 0.2 # VAD threshold
+    has_speech = speech_ratio > VAD_THRESHOLD
 
     return has_speech, speech_ratio, audio
 
@@ -343,6 +345,29 @@ def enroll_speaker_safe(name, enrollment):
 
     return name
 
+# ---------------- VAD calibration ----------------
+
+def calibrate_vad(device, duration=2.0, margin=0.10):
+    global VAD_THRESHOLD
+    print(f"🔇 Calibrating VAD — stay quiet for {duration:.0f} seconds...")
+    samples = []
+    with sd.InputStream(
+        device=device,
+        samplerate=SAMPLE_RATE,
+        channels=CHANNELS,
+        dtype="int16",
+        blocksize=OW_FRAME_SIZE,
+    ) as stream:
+        end = time.time() + duration
+        while time.time() < end:
+            chunk, _ = stream.read(OW_FRAME_SIZE)
+            samples.append(chunk[:, 0].copy())
+
+    audio = np.concatenate(samples).astype(np.float32) / 32768.0
+    _, ambient_ratio, _ = detect_speech_segments(audio, SAMPLE_RATE)
+    VAD_THRESHOLD = round(ambient_ratio + margin, 3)
+    print(f"✅ VAD threshold set to {VAD_THRESHOLD:.3f} (ambient={ambient_ratio:.3f} + margin={margin})")
+
 # ---------------- Main loop ----------------
 
 def main():
@@ -391,6 +416,8 @@ def main():
 
                 if input_device is None:
                     print("⚠️ No device found supporting 16 kHz — set NUDLE_INPUT_DEVICE=<n> to pick one manually")
+
+    calibrate_vad(input_device)
 
     with sd.InputStream(
         device=input_device,
