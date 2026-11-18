@@ -30,3 +30,4 @@ mutagen
 # Utilities
 scipy
 requests
+python-dotenv

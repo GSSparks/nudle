@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
 import warnings
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 import queue
 import sounddevice as sd
 import numpy as np
