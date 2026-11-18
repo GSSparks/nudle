@@ -28,4 +28,9 @@ librosa
 
 # Backend
 fastapi
+uvicorn
 mutagen
+
+# Utilities
+scipy
+requests
