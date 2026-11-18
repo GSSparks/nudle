@@ -1,8 +1,9 @@
+import os
 import requests
 import re
 from tts import speak
 
-DEFAULT_LOCATION = "46711"  # zip or city
+DEFAULT_LOCATION = os.environ.get("NUDLE_WEATHER_LOCATION", "New York City, NY")
 WTTR_BASE = "https://wttr.in"
 
 def can_handle(text: str) -> bool:

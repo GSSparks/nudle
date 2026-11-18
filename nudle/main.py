@@ -70,9 +70,18 @@ whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
 openwakeword.utils.download_models()
 
+_WAKE_WORD_ONNX = os.path.join(os.path.dirname(__file__), "assets", "Hey_Noodle.onnx")
+_wake_word_env = os.environ.get("NUDLE_WAKE_WORD")
+if _wake_word_env:
+    WAKE_WORD_MODEL = [_wake_word_env]
+elif os.path.exists(_WAKE_WORD_ONNX):
+    WAKE_WORD_MODEL = [_WAKE_WORD_ONNX]
+else:
+    WAKE_WORD_MODEL = ["hey jarvis"]
+print(f"Wake word model: {WAKE_WORD_MODEL}")
+
 ow_model = Model(
-    #wakeword_models=["/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx"],
-    wakeword_models=["hey jarvis"],
+    wakeword_models=WAKE_WORD_MODEL,
     enable_speex_noise_suppression=False,
     vad_threshold=0.6,
     inference_framework="onnx",

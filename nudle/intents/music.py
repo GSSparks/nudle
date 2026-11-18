@@ -427,4 +427,8 @@ def handle(text: str):
         opts = ", ".join(intent.get("candidates", []))
         return f"I found multiple matches for {v}. Did you mean the {opts}?"
 
-    return "Sorry, I couldn't figure out what music you wanted."
+    # No target — shuffle the whole library
+    success, _ = fetch_playlist("random", interrupt=True)
+    if success:
+        return "Playing some music."
+    return "Sorry, I couldn't find any music."

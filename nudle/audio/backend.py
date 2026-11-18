@@ -160,7 +160,23 @@ def create_playlist(data: Prompt):
     tracks = []
     print("DEBUG: ", prompt)
 
-    if prompt.startswith("album:"):
+    if prompt == "random":
+        index = snapshot_index()
+        if not index:
+            raise HTTPException(404, "No tracks indexed")
+        sample = random.sample(index, min(50, len(index)))
+        return {
+            "matched": {"type": "random", "value": "random"},
+            "tracks": [
+                {
+                    "title": os.path.basename(e["path"]),
+                    "url": f"http://{PI_HOST}/local/{quote(os.path.relpath(e['path'], LOCAL_MUSIC_DIR))}",
+                }
+                for e in sample
+            ],
+        }
+
+    elif prompt.startswith("album:"):
         matched, tracks = find_by_field("album", prompt[6:])
         if not tracks:
             raise HTTPException(404, "Album not found")
