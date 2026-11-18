@@ -21,6 +21,7 @@ from tts import speak
 from audio.ducking import duck, unduck
 from intents import radio, music, weather, gag
 from intents import time as time_intent
+from intents.classifier import IntentClassifier
 
 # ---------------- openWakeWord ----------------
 import openwakeword
@@ -69,6 +70,7 @@ VAD_THRESHOLD = 0.15  # calibrated at startup
 # ---------------- Models ----------------
 
 whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+intent_classifier = IntentClassifier()
 
 openwakeword.utils.download_models()
 
@@ -266,10 +268,27 @@ def transcribe(pcm_bytes):
 
 # ---------------- Intent router ----------------
 
+_INTENT_MODULE_MAP = {
+    "music": music,
+    "radio": radio,
+    "weather": weather,
+    "time": time_intent,
+    "gag": gag,
+}
+
 def handle_command(text):
+    intent, confidence = intent_classifier.classify(text)
+    print(f"🧠 Intent: {intent} ({confidence:.2f})")
+
+    module = _INTENT_MODULE_MAP.get(intent)
+    if module:
+        return module.handle(text)
+
+    # Fallback to keyword matching if classifier is uncertain
     for module in [time_intent, radio, music, weather, gag]:
         if module.can_handle(text):
             return module.handle(text)
+
     return "Sorry, I didn't understand that."
 
 def handle_followup(text, context):

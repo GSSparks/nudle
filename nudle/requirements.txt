@@ -31,3 +31,4 @@ mutagen
 scipy
 requests
 python-dotenv
+sentence-transformers
