@@ -43,7 +43,7 @@ OW_FRAME_SIZE = int(SAMPLE_RATE * OW_FRAME_MS / 1000)  # 1280 samples
 WHISPER_MODEL = "tiny.en"
 
 WAKE_CONFIDENCE = 0.75
-WAKE_COOLDOWN = 20
+WAKE_COOLDOWN = 2
 
 COMMAND_TIMEOUT = 2.0
 CONVERSATION_TIMEOUT = 5
@@ -537,6 +537,7 @@ def main():
                         speak("Sorry, I couldn't complete the enrollment. Let's try again later.")
                         tts_active = False
 
+                    last_wake_time = time.time()
                     wake_latched = False
                     unduck()
                     continue
@@ -554,6 +555,7 @@ def main():
                     speak(response)
                 flush_audio_queue()
                 tts_active = False
+                last_wake_time = time.time()
                 unduck()
                 wake_latched = False
 
@@ -565,6 +567,7 @@ def main():
                     speak("Okay, let me know if you need anything.")
                     flush_audio_queue()
                     tts_active = False
+                    last_wake_time = time.time()
                     conversation_active = False
                     conversation_context = {}
                     unduck()
@@ -592,6 +595,7 @@ def main():
                     wake_latched = False
                 flush_audio_queue()
                 tts_active = False
+                last_wake_time = time.time()
 
 # ---------------- Entry point ----------------
 
