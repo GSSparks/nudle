@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import os
 import warnings
-from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except ImportError:
+    pass
 import queue
 import sounddevice as sd
 import numpy as np
@@ -412,14 +415,16 @@ def main():
     input_device = None
 
     # Manual override via env var: NUDLE_INPUT_DEVICE=6
-    env_device = os.environ.get("NUDLE_INPUT_DEVICE")
-    if env_device is not None:
+    env_device = os.environ.get("NUDLE_INPUT_DEVICE", "").strip()
+    if env_device:
         input_device = int(env_device)
         print(f"🎤 Using device #{input_device} (NUDLE_INPUT_DEVICE override)")
     else:
         input_devices = [(i, dev) for i, dev in enumerate(sd.query_devices()) if dev["max_input_channels"] > 0]
         for i, dev in input_devices:
             print(f"  Input #{i}: {dev['name']}")
+
+        MIC_PREFERENCE = ["wm8960", "blue", "rode", "focusrite", "scarlett", "yeti", "snowball", "samson"]
 
         # Priority 1: WM8960 HAT (Raspberry Pi target hardware)
         for i, dev in input_devices:
@@ -428,24 +433,42 @@ def main():
                 print(f"🎤 Selected WM8960 HAT (#{i})")
                 break
 
-        # Priority 2: PipeWire default (None) — handles rate conversion automatically
+        # Priority 2: Preferred dedicated microphone brands
+        preferred_found = False
         if input_device is None:
-            try:
-                sd.check_input_settings(device=None, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
-                print("🎤 Using PipeWire default input")
-            except Exception:
-                # Priority 3: First numbered device that accepts 16 kHz directly
+            for keyword in MIC_PREFERENCE[1:]:  # skip wm8960, already checked
                 for i, dev in input_devices:
-                    try:
-                        sd.check_input_settings(device=i, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
-                        input_device = i
-                        print(f"🎤 Selected #{i}: {dev['name']}")
+                    if keyword in dev["name"].lower():
+                        preferred_found = True
+                        try:
+                            sd.check_input_settings(device=i, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
+                            input_device = i
+                            print(f"🎤 Selected preferred mic #{i}: {dev['name']}")
+                        except Exception:
+                            # Needs PipeWire resampling — input_device stays None
+                            print(f"🎤 Preferred mic #{i} ({dev['name']}) routing via PipeWire")
                         break
-                    except Exception:
-                        continue
+                if preferred_found:
+                    break
 
-                if input_device is None:
-                    print("⚠️ No device found supporting 16 kHz — set NUDLE_INPUT_DEVICE=<n> to pick one manually")
+        # Priority 3: PipeWire default — always use if input_device is still None
+        if input_device is None:
+            print("🎤 Using PipeWire default input")
+            # input_device stays None; PipeWire handles routing and resampling
+
+        # Priority 4: Scan numbered devices — only if no preferred mic was found at all
+        if not preferred_found and input_device is None:
+            for i, dev in input_devices:
+                try:
+                    sd.check_input_settings(device=i, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
+                    input_device = i
+                    print(f"🎤 Selected #{i}: {dev['name']}")
+                    break
+                except Exception:
+                    continue
+
+            if input_device is None:
+                print("⚠️ No device found supporting 16 kHz — set NUDLE_INPUT_DEVICE=<n> to pick one manually")
 
     calibrate_vad(input_device)
 

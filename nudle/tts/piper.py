@@ -6,13 +6,11 @@ import signal
 from intents import music
 from intents import radio
 
-VOICE_PATH = os.environ.get(
-    "PIPER_VOICE",
+VOICE_PATH = os.environ.get("PIPER_VOICE", "").strip() or \
     os.path.join(os.path.dirname(__file__), "voices", "en_US-lessac-medium.onnx")
-)
 
 # Prefer the binary pinned by the dev environment (Nix package), fall back to PATH
-PIPER_BIN = os.environ.get("PIPER_BIN") or shutil.which("piper")
+PIPER_BIN = os.environ.get("PIPER_BIN", "").strip() or shutil.which("piper")
 MPV_BIN = shutil.which("mpv")
 
 

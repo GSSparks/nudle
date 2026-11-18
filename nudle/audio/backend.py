@@ -1,6 +1,9 @@
 import os
-from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+except ImportError:
+    pass
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -216,6 +219,19 @@ def create_playlist(data: Prompt):
         ]
     }
 
+
+# ---------------- Status ----------------
+
+@app.get("/status")
+def get_status():
+    with INDEX_LOCK:
+        count = len(LIB_INDEX)
+    return {
+        "music_dir": LOCAL_MUSIC_DIR,
+        "index_file": INDEX_FILE,
+        "tracks_indexed": count,
+        "indexing": INDEXING,
+    }
 
 # ---------------- Static MP3 ----------------
 

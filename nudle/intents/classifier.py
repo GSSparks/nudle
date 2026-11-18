@@ -17,6 +17,13 @@ INTENT_EXAMPLES = {
         "I want to hear some music",
         "turn on some music",
         "play music",
+        "stop",
+        "pause",
+        "skip",
+        "next song",
+        "stop playing",
+        "turn off the music",
+        "quiet",
     ],
     "radio": [
         "play the radio",
