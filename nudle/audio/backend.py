@@ -220,6 +220,36 @@ def create_playlist(data: Prompt):
     }
 
 
+# ---------------- Suggest ----------------
+
+@app.get("/suggest")
+def suggest(q: str, n: int = 3):
+    q_norm = normalize(q)
+    index = snapshot_index()
+    seen = set()
+    results = []
+
+    for field in ["genre", "artist", "album"]:
+        values = list({normalize(e[field]) for e in index if e.get(field)})
+
+        # Exact/fuzzy matches
+        matches = difflib.get_close_matches(q_norm, values, n=n, cutoff=0.4)
+
+        # Also try partial containment for short queries
+        if not matches:
+            matches = sorted(
+                (v for v in values if q_norm in v or v in q_norm),
+                key=len
+            )[:n]
+
+        for m in matches:
+            key = f"{field}:{m}"
+            if key not in seen:
+                seen.add(key)
+                results.append({"type": field, "value": m})
+
+    return {"query": q, "suggestions": results[:n]}
+
 # ---------------- Status ----------------
 
 @app.get("/status")

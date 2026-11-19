@@ -3,9 +3,14 @@ torch==2.1.2
 torchaudio==2.1.2
 soundfile
 scikit-learn
+pyarrow<15.0
 
 # Wake word detection
 openwakeword>=0.6.0
+
+# Wake word training (only needed when running tools/train.py)
+# pip install 'openwakeword[train]'
+onnx<1.16
 
 # Whisper STT
 faster-whisper>=0.6.1
@@ -31,5 +36,6 @@ mutagen
 scipy
 requests
 python-dotenv
+huggingface-hub>=0.23.2,<1.0
 transformers>=4.35.0,<4.47.0
 sentence-transformers>=2.2.2,<3.0.0

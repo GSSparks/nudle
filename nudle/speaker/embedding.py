@@ -10,6 +10,7 @@ if not hasattr(torchaudio, "AudioMetaData"):
     torchaudio.AudioMetaData = AudioMetaData
 
 CHECKPOINT = os.path.join(os.path.dirname(__file__), "..", "models", "pyannote_embedding", "pytorch_model.bin")
+HF_MODEL_ID = "pyannote/embedding"
 
 
 class SpeakerEmbedder:
@@ -18,16 +19,29 @@ class SpeakerEmbedder:
         self.model = None
 
         checkpoint = os.path.normpath(CHECKPOINT)
-        if not os.path.exists(checkpoint):
-            print(f"⚠️ Speaker model not found: {checkpoint}")
-            print("   Speaker recognition disabled. See README to download the model.")
+
+        if os.path.exists(checkpoint):
+            try:
+                self.model = Model.from_pretrained(checkpoint, strict=False).to(device).eval()
+                print("✅ Speaker embedding model loaded")
+                return
+            except Exception as e:
+                print(f"⚠️ Local model load failed: {e}")
+
+        hf_token = os.environ.get("HUGGINGFACE_TOKEN", "").strip() or None
+        if not hf_token:
+            print("⚠️ Speaker model not found and HUGGINGFACE_TOKEN not set.")
+            print("   Add HUGGINGFACE_TOKEN to .env to auto-download on first run.")
             return
 
         try:
-            self.model = Model.from_pretrained(checkpoint, strict=False).to(device).eval()
-            print("✅ Speaker embedding model loaded")
+            print(f"📥 Downloading speaker embedding model ({HF_MODEL_ID})...")
+            self.model = Model.from_pretrained(
+                HF_MODEL_ID, use_auth_token=hf_token
+            ).to(device).eval()
+            print("✅ Speaker embedding model loaded from HuggingFace")
         except Exception as e:
-            print(f"⚠️ Failed to load speaker model: {e}")
+            print(f"⚠️ Could not load speaker model: {e}")
             print("   Speaker recognition disabled.")
 
     def embed(self, wav_path: str, debug=False):

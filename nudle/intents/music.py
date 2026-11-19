@@ -304,6 +304,35 @@ def fetch_playlist(prompt, interrupt=True):
         print(f"⚠️ Error fetching playlist: {e}")
         return False, None
 
+# ---------------- Suggestions ----------------
+
+def fetch_suggestions(query: str, n: int = 3) -> list:
+    try:
+        res = requests.get(
+            "http://localhost:8000/suggest",
+            params={"q": query, "n": n},
+            timeout=5,
+        )
+        res.raise_for_status()
+        return [(s["type"], s["value"]) for s in res.json().get("suggestions", [])]
+    except Exception as e:
+        print(f"⚠️ Suggest failed: {e}")
+        return []
+
+
+def _suggestion_response(query: str) -> str | dict:
+    suggestions = fetch_suggestions(query)
+    if not suggestions:
+        return f"Sorry, I couldn't find anything like {query}."
+    parts = [f"the {ct} {cv}" for ct, cv in suggestions[:2]]
+    opts = " or ".join(parts)
+    return {
+        "prompt": f"I couldn't find {query}, but I have {opts}. Want to hear one?",
+        "intent": "music",
+        "expect": "clarification",
+        "candidates": suggestions,
+    }
+
 # ---------------- Music intent parser ----------------
 
 def parse_music_prompt(prompt: str) -> dict:
@@ -323,32 +352,32 @@ def parse_music_prompt(prompt: str) -> dict:
     if not raw:
         return {"type": "unknown", "value": None, "raw": text}
 
-    # Smart album search: try full match, then partial matches
-    # Try as full album name
-    if check_playlist_exists(f"album:{raw}")[0]:
-        return {"type": "album", "value": raw, "raw": text}
-
-    # Try as partial album name (for albums like "Echoes - The Best of...")
-    # Split on common separators and try first part
+    # Partial album name (split on common separators before multi-match check)
+    album_value = raw
     for separator in [' - ', ': ', ' / ']:
         if separator in raw:
             first_part = raw.split(separator)[0].strip()
             if first_part and check_playlist_exists(f"album:{first_part}")[0]:
-                return {"type": "album", "value": first_part, "raw": text}
+                album_value = first_part
+                break
 
-    # Try as genre
+    # Collect all matching types
+    candidates = []
+    if check_playlist_exists(f"album:{album_value}")[0]:
+        candidates.append(("album", album_value))
     if check_playlist_exists(f"genre:{raw}")[0]:
-        return {"type": "genre", "value": raw, "raw": text}
-
-    # Try as artist
+        candidates.append(("genre", raw))
     if check_playlist_exists(f"artist:{raw}")[0]:
-        return {"type": "artist", "value": raw, "raw": text}
-
-    # Try as song
+        candidates.append(("artist", raw))
     if check_playlist_exists(raw)[0]:
-        return {"type": "song", "value": raw, "raw": text}
+        candidates.append(("song", raw))
 
-    return {"type": "unknown", "value": raw, "raw": text}
+    if not candidates:
+        return {"type": "unknown", "value": raw, "raw": text}
+    if len(candidates) == 1:
+        t, v = candidates[0]
+        return {"type": t, "value": v, "raw": text}
+    return {"type": "ambiguous", "candidates": candidates, "value": raw, "raw": text}
 
 # ---------------- Intent interface ----------------
 
@@ -414,21 +443,53 @@ def handle(text: str):
             else:
                 return f"Playing {matched_value}"
         else:
-            if t == "album":
-                return f"Sorry, I couldn't find the album {v}"
-            elif t == "artist":
-                return f"Sorry, I couldn't find music by {v}"
-            elif t == "genre":
-                return f"Sorry, I couldn't find any {v} music"
-            else:
-                return f"Sorry, I couldn't find the song {v}"
+            return _suggestion_response(v)
 
     if t == "ambiguous":
-        opts = ", ".join(intent.get("candidates", []))
-        return f"I found multiple matches for {v}. Did you mean the {opts}?"
+        candidates = intent["candidates"]
+        parts = [f"the {ct} {cv}" for ct, cv in candidates[:3]]
+        opts = " or ".join(parts) if len(parts) == 2 else ", ".join(parts[:-1]) + f", or {parts[-1]}"
+        return {
+            "prompt": f"Did you mean {opts}?",
+            "intent": "music",
+            "expect": "clarification",
+            "candidates": candidates,
+        }
 
-    # No target — shuffle the whole library
+    # Has a value but nothing matched — suggest alternatives
+    if v:
+        return _suggestion_response(v)
+
+    # No target at all — shuffle the whole library
     success, _ = fetch_playlist("random", interrupt=True)
     if success:
         return "Playing some music."
     return "Sorry, I couldn't find any music."
+
+
+def handle_followup(text: str, context: dict) -> str:
+    candidates = context.get("candidates", [])
+    text_norm = normalize_text(text)
+
+    # Match by type keyword ("album", "artist", "genre", "song")
+    for ct, cv in candidates:
+        if ct in text_norm:
+            tag = f"{ct}:{cv}" if ct in ["album", "artist", "genre"] else cv
+            success, data = fetch_playlist(tag, interrupt=True)
+            if success:
+                matched = data.get("matched", {}).get("value", cv)
+                return f"Playing {ct} {matched}."
+
+    # Match by value name (whole-word only to avoid "blue" matching "bluegrass")
+    words = set(text_norm.split())
+    for ct, cv in candidates:
+        cv_words = set(cv.split())
+        if cv_words & words or difflib.get_close_matches(text_norm, [cv], n=1, cutoff=0.7):
+            tag = f"{ct}:{cv}" if ct in ["album", "artist", "genre"] else cv
+            success, data = fetch_playlist(tag, interrupt=True)
+            if success:
+                matched = data.get("matched", {}).get("value", cv)
+                return f"Playing {ct} {matched}."
+
+    parts = [f"the {ct}" for ct, _ in candidates]
+    return f"Sorry, I didn't catch that. Try saying {' or '.join(parts)}."

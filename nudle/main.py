@@ -97,7 +97,7 @@ print(f"Loaded models: {ow_model.models.keys()}")
 
 speaker_embedder = SpeakerEmbedder(device="cpu")
 speaker_registry = SpeakerRegistry()
-speaker_verifier = SpeakerVerifier(speaker_registry, threshold=0.70, auto_learn_threshold=0.80)
+speaker_verifier = SpeakerVerifier(speaker_registry, threshold=0.55, auto_learn_threshold=0.65)
 
 # ---------------- Audio callback ----------------
 
@@ -221,15 +221,10 @@ def embed_from_pcm(pcm_bytes, debug=False):
               f"speech={features['speech_ratio']:.0%}, "
               f"duration={features['duration']:.1f}s")
 
-    # Reject low-quality audio
-    if not features["has_speech"]:
+    # Reject low-quality audio — use absolute energy; adaptive speech_ratio is unreliable
+    if features["energy"] < 0.015:
         if debug:
-            print(f"   ⚠️ No speech detected")
-        return None, features
-
-    if features["energy"] < 0.005: # Energy Threshold
-        if debug:
-            print(f"   ⚠️ Audio too quiet")
+            print(f"   ⚠️ Audio too quiet (energy={features['energy']:.4f})")
         return None, features
 
     # Apply pre-emphasis filter to boost high frequencies
@@ -298,6 +293,8 @@ def handle_followup(text, context):
     intent_name = context.get("intent")
     if intent_name in ("timer", "alarm"):
         return time_intent.handle_followup(text, context)
+    if intent_name == "music":
+        return music.handle_followup(text, context)
     return "Sorry, I didn't understand."
 
 # ---------------- Enhanced Enrollment ----------------
@@ -322,6 +319,7 @@ def enroll_speaker_safe(name, enrollment):
         attempts += 1
         print(f"\n📝 Sample {successful_samples+1}/{target_samples} - Get ready...")
         time.sleep(1.5)
+        flush_audio_queue()
 
         pcm = enrollment.collect_speech(4.0)
         if not pcm:
@@ -382,24 +380,35 @@ def enroll_speaker_safe(name, enrollment):
 
 def calibrate_vad(device, duration=2.0, margin=0.10):
     global VAD_THRESHOLD
-    print(f"🔇 Calibrating VAD — stay quiet for {duration:.0f} seconds...")
-    samples = []
-    with sd.InputStream(
-        device=device,
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
-        dtype="int16",
-        blocksize=OW_FRAME_SIZE,
-    ) as stream:
-        end = time.time() + duration
-        while time.time() < end:
-            chunk, _ = stream.read(OW_FRAME_SIZE)
-            samples.append(chunk[:, 0].copy())
+    devices_to_try = [device] if device is not None else [None]
+    if device is not None:
+        devices_to_try.append(None)  # fallback to PipeWire default
 
-    audio = np.concatenate(samples).astype(np.float32) / 32768.0
-    _, ambient_ratio, _ = detect_speech_segments(audio, SAMPLE_RATE)
-    VAD_THRESHOLD = round(ambient_ratio + margin, 3)
-    print(f"✅ VAD threshold set to {VAD_THRESHOLD:.3f} (ambient={ambient_ratio:.3f} + margin={margin})")
+    for dev in devices_to_try:
+        try:
+            print(f"🔇 Calibrating VAD — stay quiet for {duration:.0f} seconds...")
+            samples = []
+            with sd.InputStream(
+                device=dev,
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=OW_FRAME_SIZE,
+            ) as stream:
+                end = time.time() + duration
+                while time.time() < end:
+                    chunk, _ = stream.read(OW_FRAME_SIZE)
+                    samples.append(chunk[:, 0].copy())
+
+            audio = np.concatenate(samples).astype(np.float32) / 32768.0
+            _, ambient_ratio, _ = detect_speech_segments(audio, SAMPLE_RATE)
+            VAD_THRESHOLD = round(ambient_ratio + margin, 3)
+            print(f"✅ VAD threshold set to {VAD_THRESHOLD:.3f} (ambient={ambient_ratio:.3f} + margin={margin})")
+            return
+        except Exception as e:
+            print(f"⚠️ VAD calibration failed on device {dev}: {e}")
+
+    print(f"⚠️ VAD calibration skipped — using default threshold {VAD_THRESHOLD}")
 
 # ---------------- Main loop ----------------
 
@@ -451,24 +460,33 @@ def main():
                 if preferred_found:
                     break
 
-        # Priority 3: PipeWire default — always use if input_device is still None
+        # Priority 3: PipeWire default — try if input_device is still None
         if input_device is None:
-            print("🎤 Using PipeWire default input")
-            # input_device stays None; PipeWire handles routing and resampling
+            try:
+                sd.check_input_settings(device=None, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
+                print("🎤 Using PipeWire default input")
+            except Exception:
+                # Priority 4: Scan numbered devices — preferred brands first, then any
+                ordered = []
+                for keyword in MIC_PREFERENCE:
+                    for i, dev in input_devices:
+                        if keyword in dev["name"].lower() and i not in [x for x, _ in ordered]:
+                            ordered.append((i, dev))
+                for i, dev in input_devices:
+                    if i not in [x for x, _ in ordered]:
+                        ordered.append((i, dev))
 
-        # Priority 4: Scan numbered devices — only if no preferred mic was found at all
-        if not preferred_found and input_device is None:
-            for i, dev in input_devices:
-                try:
-                    sd.check_input_settings(device=i, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
-                    input_device = i
-                    print(f"🎤 Selected #{i}: {dev['name']}")
-                    break
-                except Exception:
-                    continue
+                for i, dev in ordered:
+                    try:
+                        sd.check_input_settings(device=i, samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16")
+                        input_device = i
+                        print(f"🎤 Selected #{i}: {dev['name']}")
+                        break
+                    except Exception:
+                        continue
 
-            if input_device is None:
-                print("⚠️ No device found supporting 16 kHz — set NUDLE_INPUT_DEVICE=<n> to pick one manually")
+                if input_device is None:
+                    print("⚠️ No device found supporting 16 kHz — set NUDLE_INPUT_DEVICE=<n> to pick one manually")
 
     calibrate_vad(input_device)
 
@@ -553,12 +571,12 @@ def main():
                 print(f"🗣️ Heard: {text}")
 
                 # Greet if confident
-                if speaker_name and speaker_score >= 0.70:
+                if speaker_name and speaker_score >= 0.55:
                     tts_active = True
                     speak(f"Hi {speaker_name}")
                     tts_active = False
                     print(f"✅ Recognized: {speaker_name} ({speaker_score:.2f})")
-                elif speaker_name and speaker_score >= 0.50:
+                elif speaker_name and speaker_score >= 0.40:
                     print(f"🤔 Possible speaker: {speaker_name} (confidence: {speaker_score:.2f})")
                 else:
                     print(f"❓ Unknown speaker (best: {speaker_name}, {speaker_score:.2f})")
@@ -594,6 +612,7 @@ def main():
                         tts_active = False
 
                         time.sleep(0.5)
+                        flush_audio_queue()
                         pcm_test = collect_speech_window(3.0)
                         test_embedding, test_features = embed_from_pcm(pcm_test, debug=True)
 
@@ -601,7 +620,7 @@ def main():
                             test_name, test_score = speaker_verifier.verify(test_embedding, auto_learn=False)
                             print(f"🧪 Verification: {test_name} ({test_score:.3f})")
 
-                            if test_score >= 0.70:
+                            if test_score >= 0.55:
                                 tts_active = True
                                 speak(f"Perfect! I recognize you, {name}.")
                                 tts_active = False
@@ -631,7 +650,7 @@ def main():
                     conversation_context = response
                     last_interaction_time = time.time()
                     speak(response["prompt"])
-                else:
+                elif response:
                     speak(response)
                 flush_audio_queue()
                 tts_active = False
@@ -668,7 +687,8 @@ def main():
                     conversation_context = response
                     speak(response["prompt"])
                 else:
-                    speak(response)
+                    if response:
+                        speak(response)
                     conversation_active = False
                     conversation_context = {}
                     unduck()

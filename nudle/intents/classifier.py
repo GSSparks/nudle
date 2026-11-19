@@ -67,14 +67,6 @@ INTENT_EXAMPLES = {
         "that was awful",
         "you are an idiot",
     ],
-    "enroll": [
-        "my name is gary",
-        "my name is john",
-        "call me sarah",
-        "I am michael",
-        "remember my name",
-        "my name is",
-    ],
 }
 
 CONFIDENCE_THRESHOLD = 0.35

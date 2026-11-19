@@ -46,4 +46,4 @@ def handle(text: str):
         if trigger in text:
             response = random.choice(responses)
             return response
-    return None
+    return "I'm not sure how to respond to that."
