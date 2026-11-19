@@ -665,18 +665,20 @@ def main():
                 response = handle_command(text)
                 tts_active = True
                 flush_audio_queue()
-                if isinstance(response, dict):
-                    conversation_active = True
-                    conversation_context = response
-                    last_interaction_time = time.time()
-                    speak(response["prompt"])
-                elif response:
-                    speak(response)
-                flush_audio_queue()
-                tts_active = False
-                last_wake_time = time.time()
-                unduck()
-                wake_latched = False
+                try:
+                    if isinstance(response, dict):
+                        conversation_active = True
+                        conversation_context = response
+                        last_interaction_time = time.time()
+                        speak(response["prompt"])
+                    elif response:
+                        speak(response)
+                finally:
+                    flush_audio_queue()
+                    tts_active = False
+                    last_wake_time = time.time()
+                    unduck()
+                    wake_latched = False
 
             # ---------------- Conversation follow-up ----------------
             if conversation_active:
