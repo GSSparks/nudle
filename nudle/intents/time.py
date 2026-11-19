@@ -15,8 +15,44 @@ active_alarms = []   # [{thread, target}]
 timer_cancel_event = threading.Event()
 alarm_cancel_event = threading.Event()
 
-DEFAULT_ALARM_SOUND = "../assets/lo-fi-alarm-clock-243766.mp3"  # Replace with your default alarm sound
-ALARM_PLAYER = "mpg123"  # or "mpv"
+DEFAULT_ALARM_SOUND = os.path.join(os.path.dirname(__file__), "..", "assets", "lo-fi-alarm-clock-243766.mp3")
+ALARM_PLAYER = "mpv"
+
+# Injected by main.py so background threads can speak through the main audio pipeline
+_speak_fn = None
+
+def set_speak_fn(fn):
+    global _speak_fn
+    _speak_fn = fn
+
+def _speak(text: str):
+    if _speak_fn:
+        _speak_fn(text)
+    else:
+        tts_speak(text)
+
+# Running alert player process (looping chime for timer/alarm)
+_alert_process = None
+
+def _start_alert(sound_file: str = DEFAULT_ALARM_SOUND):
+    global _alert_process
+    _stop_alert()
+    if os.path.isfile(sound_file):
+        try:
+            _alert_process = subprocess.Popen(
+                [ALARM_PLAYER, "--no-video", "--quiet", "--loop-file=inf", sound_file]
+            )
+        except Exception:
+            pass
+
+def _stop_alert() -> bool:
+    global _alert_process
+    if _alert_process and _alert_process.poll() is None:
+        _alert_process.terminate()
+        _alert_process = None
+        return True
+    _alert_process = None
+    return False
 
 # ---------------- Helpers ----------------
 
@@ -42,7 +78,7 @@ def timer_thread(start: float, duration: int):
         if timer_cancel_event.is_set():
             return
         time.sleep(0.2)
-    tts_speak("Timer finished.")
+    _start_alert()
 
 def set_timer(seconds: int):
     timer_cancel_event.clear()
@@ -60,16 +96,16 @@ def set_timer(seconds: int):
     })
 
 def cancel_timer(all_timers=False):
+    alert_stopped = _stop_alert()
+
     if not active_timers:
-        return False
+        return alert_stopped
 
     timer_cancel_event.set()
-
     if all_timers:
         active_timers.clear()
     else:
         active_timers.pop()
-
     timer_cancel_event.clear()
     return True
 
@@ -93,12 +129,8 @@ def timer_remaining():
 def alarm_thread(target: datetime, sound_file: str = DEFAULT_ALARM_SOUND):
     while not alarm_cancel_event.is_set():
         if datetime.now() >= target:
-            tts_speak("Alarm going off.")
-            if sound_file and os.path.isfile(sound_file):
-                try:
-                    subprocess.Popen([ALARM_PLAYER, "-q", sound_file])
-                except Exception as e:
-                    tts_speak(f"Failed to play alarm sound: {e}")
+            _speak("Alarm going off.")
+            _start_alert(sound_file)
             return
         time.sleep(5)
 
@@ -117,16 +149,16 @@ def set_alarm(target: datetime, sound_file: str = DEFAULT_ALARM_SOUND):
     })
 
 def cancel_alarm(all_alarms=False):
+    alert_stopped = _stop_alert()
+
     if not active_alarms:
-        return False
+        return alert_stopped
 
     alarm_cancel_event.set()
-
     if all_alarms:
         active_alarms.clear()
     else:
         active_alarms.pop()
-
     alarm_cancel_event.clear()
     return True
 
@@ -313,6 +345,7 @@ def handle(text: str):
                 "expect": "duration",
                 "intent": "timer"
             }
+        set_timer(seconds)
         return f"Timer set for {format_duration(seconds)}."
 
     # -------- ALARM --------

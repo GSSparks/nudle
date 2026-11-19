@@ -297,6 +297,16 @@ def handle_followup(text, context):
         return music.handle_followup(text, context)
     return "Sorry, I didn't understand."
 
+def speak_safe(text: str):
+    """TTS entry point for background threads (timers, alarms). Sets flags to prevent echo."""
+    global tts_active, last_wake_time
+    tts_active = True
+    flush_audio_queue()
+    speak(text)
+    flush_audio_queue()
+    tts_active = False
+    last_wake_time = time.time()
+
 # ---------------- Enhanced Enrollment ----------------
 
 def enroll_speaker_safe(name, enrollment):
@@ -417,6 +427,8 @@ def main():
     global conversation_active, conversation_context
     global last_interaction_time, last_wake_time
     global tts_active
+
+    time_intent.set_speak_fn(speak_safe)
 
     print("🎙️ Nüdle listening (openWakeWord ONNX)")
 
