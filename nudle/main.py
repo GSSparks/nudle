@@ -15,6 +15,7 @@ import soundfile as sf
 import librosa
 from scipy import signal
 
+import torch
 from faster_whisper import WhisperModel
 
 warnings.filterwarnings("ignore", message="torchaudio._backend.set_audio_backend")
@@ -68,12 +69,22 @@ last_wake_time = 0
 last_interaction_time = 0
 tts_active = False
 
-VAD_THRESHOLD = 0.15  # calibrated at startup
+VAD_THRESHOLD = 0.5  # Silero speech probability threshold; raised by calibrate_vad() if noisy
 
 # ---------------- Models ----------------
 
 whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 intent_classifier = IntentClassifier()
+
+print("Loading Silero VAD...")
+_silero_model, _silero_utils = torch.hub.load(
+    repo_or_dir="snakers4/silero-vad",
+    model="silero_vad",
+    force_reload=False,
+    trust_repo=True,
+)
+_get_speech_timestamps = _silero_utils[0]
+print("Silero VAD loaded.")
 
 openwakeword.utils.download_models()
 
@@ -144,41 +155,28 @@ def collect_speech_window(duration=1.5):
 
 # ---------------- Voice Activity Detection ----------------
 
-def detect_speech_segments(audio, sample_rate=16000, frame_length=0.025, frame_step=0.010):
+def detect_speech_segments(audio, sample_rate=16000):
     """
-    Detect speech segments in audio using energy-based VAD.
-    Returns: (has_speech, speech_ratio, clean_audio)
+    Detect speech segments using Silero VAD.
+    Returns: (has_speech, speech_ratio, audio)
     """
-    # Convert to float
     if audio.dtype == np.int16:
         audio = audio.astype(np.float32) / 32768.0
 
-    # Calculate frame parameters
-    frame_length_samples = int(frame_length * sample_rate)
-    frame_step_samples = int(frame_step * sample_rate)
+    tensor = torch.from_numpy(audio)
+    timestamps = _get_speech_timestamps(
+        tensor,
+        _silero_model,
+        sampling_rate=sample_rate,
+        threshold=VAD_THRESHOLD,
+    )
 
-    # Calculate energy per frame
-    frames = []
-    for i in range(0, len(audio) - frame_length_samples, frame_step_samples):
-        frame = audio[i:i + frame_length_samples]
-        energy = np.sqrt(np.mean(frame ** 2))
-        frames.append(energy)
-
-    if not frames:
+    if not timestamps:
         return False, 0.0, audio
 
-    frames = np.array(frames)
-
-    # Adaptive threshold: mean + 0.5 * std
-    threshold = np.mean(frames) + 0.5 * np.std(frames)
-
-    # Count speech frames
-    speech_frames = np.sum(frames > threshold)
-    speech_ratio = speech_frames / len(frames)
-
-    has_speech = speech_ratio > VAD_THRESHOLD
-
-    return has_speech, speech_ratio, audio
+    total_speech = sum(ts["end"] - ts["start"] for ts in timestamps)
+    speech_ratio = total_speech / len(audio)
+    return True, speech_ratio, audio
 
 def extract_speech_features(pcm_bytes, sample_rate=16000):
     """
@@ -388,7 +386,7 @@ def enroll_speaker_safe(name, enrollment):
 
 # ---------------- VAD calibration ----------------
 
-def calibrate_vad(device, duration=2.0, margin=0.10):
+def calibrate_vad(device, duration=2.0):
     global VAD_THRESHOLD
     devices_to_try = [device] if device is not None else [None]
     if device is not None:
@@ -411,14 +409,24 @@ def calibrate_vad(device, duration=2.0, margin=0.10):
                     samples.append(chunk[:, 0].copy())
 
             audio = np.concatenate(samples).astype(np.float32) / 32768.0
-            _, ambient_ratio, _ = detect_speech_segments(audio, SAMPLE_RATE)
-            VAD_THRESHOLD = round(ambient_ratio + margin, 3)
-            print(f"✅ VAD threshold set to {VAD_THRESHOLD:.3f} (ambient={ambient_ratio:.3f} + margin={margin})")
+            tensor = torch.from_numpy(audio)
+            timestamps = _get_speech_timestamps(tensor, _silero_model, sampling_rate=SAMPLE_RATE, threshold=0.5)
+            ambient_ratio = (
+                sum(ts["end"] - ts["start"] for ts in timestamps) / len(audio)
+                if timestamps else 0.0
+            )
+
+            if ambient_ratio > 0.1:
+                # Noisy room: raise threshold to reduce false positives
+                VAD_THRESHOLD = round(min(0.9, 0.5 + ambient_ratio * 0.5), 2)
+                print(f"⚠️ Noisy environment — VAD threshold raised to {VAD_THRESHOLD:.2f} (ambient={ambient_ratio:.1%})")
+            else:
+                print(f"✅ VAD calibrated (ambient={ambient_ratio:.1%}, threshold={VAD_THRESHOLD:.2f})")
             return
         except Exception as e:
             print(f"⚠️ VAD calibration failed on device {dev}: {e}")
 
-    print(f"⚠️ VAD calibration skipped — using default threshold {VAD_THRESHOLD}")
+    print(f"⚠️ VAD calibration skipped — using default threshold {VAD_THRESHOLD:.2f}")
 
 # ---------------- Main loop ----------------
 
