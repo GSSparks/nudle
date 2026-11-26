@@ -7,6 +7,9 @@ try:
 except ImportError:
     pass
 import queue
+import re
+import threading
+import random
 import sounddevice as sd
 import numpy as np
 import time
@@ -23,8 +26,17 @@ warnings.filterwarnings("ignore", message="torchaudio._backend.set_audio_backend
 # --- Local imports ---
 from tts import speak
 from audio.ducking import duck, unduck
+
+try:
+    from tts import piper as _piper_tts
+    _has_barge_in = True
+except Exception:
+    _has_barge_in = False
 from intents import radio, music, weather, gag
 from intents import time as time_intent
+from intents import llm as llm_intent
+from intents import aiplay as aiplay_intent
+from intents import lights as lights_intent
 from intents.classifier import IntentClassifier
 
 # ---------------- openWakeWord ----------------
@@ -70,6 +82,16 @@ last_interaction_time = 0
 tts_active = False
 
 VAD_THRESHOLD = 0.5  # Silero speech probability threshold; raised by calibrate_vad() if noisy
+ENDPOINT_SILENCE  = 0.6   # seconds of post-speech silence before recording ends
+MAX_RECORD_SECS   = 8.0   # hard cap on command recording
+_VAD_CHUNK_SIZE   = 512   # Silero streaming VAD requires exactly 512 samples at 16 kHz
+
+BARGE_IN_SPEAKER_MIN = 0.35  # min speaker similarity to confirm a barge-in is a real person
+BARGE_IN_SPEECH_MIN  = 0.15  # min speech ratio in validation window to confirm barge-in
+
+_pending_resume: list[str] = []
+_tts_thread: threading.Thread | None = None
+_tts_interrupt = threading.Event()
 
 # ---------------- Models ----------------
 
@@ -129,17 +151,46 @@ def flush_audio_queue():
 def conversation_expired():
     return time.time() - last_interaction_time > CONVERSATION_TIMEOUT
 
-def collect_command_audio(timeout=COMMAND_TIMEOUT):
-    samples = []
+def collect_command_audio(timeout=MAX_RECORD_SECS):
+    all_samples = []
+    speech_started = False
+    last_speech_time = None
     start = time.time()
+
+    try:
+        _silero_model.reset_states()
+    except Exception:
+        pass
+
     while time.time() - start < timeout:
         try:
-            samples.append(audio_queue.get(timeout=0.1))
+            chunk = audio_queue.get(timeout=0.05)
         except queue.Empty:
-            pass
-    if not samples:
+            if speech_started and last_speech_time and (time.time() - last_speech_time >= ENDPOINT_SILENCE):
+                break
+            continue
+
+        all_samples.append(chunk)
+        audio_f = chunk.astype(np.float32) / 32768.0
+
+        # Silero streaming mode requires exactly _VAD_CHUNK_SIZE samples; walk sub-chunks
+        for i in range(0, len(audio_f) - _VAD_CHUNK_SIZE + 1, _VAD_CHUNK_SIZE):
+            vad_slice = audio_f[i : i + _VAD_CHUNK_SIZE]
+            try:
+                prob = _silero_model(torch.from_numpy(vad_slice.copy()), SAMPLE_RATE).item()
+            except Exception:
+                prob = 0.0
+            if prob >= VAD_THRESHOLD:
+                speech_started = True
+                last_speech_time = time.time()
+                break
+
+        if speech_started and last_speech_time and (time.time() - last_speech_time >= ENDPOINT_SILENCE):
+            break
+
+    if not all_samples or not speech_started:
         return None
-    return np.concatenate(samples).astype(np.int16).tobytes()
+    return np.concatenate(all_samples).astype(np.int16).tobytes()
 
 def collect_speech_window(duration=1.5):
     samples = []
@@ -272,31 +323,86 @@ _INTENT_MODULE_MAP = {
     "gag": gag,
 }
 
+_LLM_ROUTE_MAP = {
+    "lights": lambda t: lights_intent.handle(t),
+    "weather": lambda t: weather.handle(t),
+    "radio": lambda t: radio.handle(t),
+    "time": lambda t: time_intent.handle(t),
+}
+
+
 def handle_command(text):
+    # Lights always wins before the classifier — "turn off the lights" scores as music otherwise
+    if lights_intent.can_handle(text):
+        return lights_intent.handle(text)
+
     intent, confidence = intent_classifier.classify(text)
     print(f"🧠 Intent: {intent} ({confidence:.2f})")
+
+    if intent == "music":
+        t = text.lower()
+        if any(k in t for k in ["stop", "pause", "halt", "quiet", "shut"]):
+            music.stop_current_playback()
+            aiplay_intent.stop_playback()
+            radio.stop_radio()
+            return "Music stopped."
+        if any(k in t for k in ["next", "skip"]):
+            if aiplay_intent.player_process and aiplay_intent.player_process.poll() is None:
+                aiplay_intent.player_process.terminate()
+            else:
+                music.skip_to_next_track()
+            return "Skipping."
+        # Vague/mood requests go to AI playlist; specific song/artist requests go to local library
+        if aiplay_intent.can_handle(text):
+            return aiplay_intent.handle(text)
+        result = music.handle(text)
+        # If music returned a same-value ambiguity (genre:X vs song:X), nothing specific was
+        # found — skip the confusing clarification and go straight to aiplay
+        if isinstance(result, dict) and result.get("expect") == "clarification":
+            candidates = result.get("candidates", [])
+            if len({v for _, v in candidates}) == 1:
+                return aiplay_intent.handle(text)
+            result["original_query"] = text  # preserve for follow-up aiplay redirect
+        return result
 
     module = _INTENT_MODULE_MAP.get(intent)
     if module:
         return module.handle(text)
 
     # Fallback to keyword matching if classifier is uncertain
-    for module in [time_intent, radio, music, weather, gag]:
+    for module in [time_intent, radio, aiplay_intent, music, weather, lights_intent, gag]:
         if module.can_handle(text):
             return module.handle(text)
 
-    return "Sorry, I didn't understand that."
+    print("🤖 Falling back to LLM")
+    result = llm_intent.handle(text)
+    if isinstance(result, dict) and "route" in result:
+        route, routed_text = result["route"], result.get("text", text)
+        print(f"🔀 LLM routed to: {route} ({routed_text!r})")
+        if route == "music":
+            return handle_command(routed_text)
+        handler = _LLM_ROUTE_MAP.get(route)
+        if handler:
+            return handler(routed_text)
+    return result
+
+_AIPLAY_REDIRECT = {"playlist", "youtube", "online", "just play", "just play it",
+                    "find some", "ai", "generate", "doesn't matter", "anything"}
 
 def handle_followup(text, context):
     intent_name = context.get("intent")
     if intent_name in ("timer", "alarm"):
         return time_intent.handle_followup(text, context)
     if intent_name == "music":
+        t = text.lower()
+        if any(phrase in t for phrase in _AIPLAY_REDIRECT) or aiplay_intent.can_handle(t):
+            query = context.get("original_query", text)
+            return aiplay_intent.handle(query)
         return music.handle_followup(text, context)
     return "Sorry, I didn't understand."
 
 def speak_safe(text: str):
-    """TTS entry point for background threads (timers, alarms). Sets flags to prevent echo."""
+    """TTS entry point for background threads (timers, alarms). Blocking — do not call from main loop."""
     global tts_active, last_wake_time
     tts_active = True
     flush_audio_queue()
@@ -304,6 +410,66 @@ def speak_safe(text: str):
     flush_audio_queue()
     tts_active = False
     last_wake_time = time.time()
+
+
+_RESUME_BRIDGES = [
+    "Anyway, as I was saying, ",
+    "To continue, ",
+    "Where was I... ",
+]
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _tts_worker(sentences: list[str]):
+    global tts_active, last_wake_time, _pending_resume
+    for i, sentence in enumerate(sentences):
+        if _tts_interrupt.is_set():
+            _pending_resume[:] = sentences[i:]
+            break
+        speak(sentence)
+        if _tts_interrupt.is_set():
+            # speak() returned because the player was killed mid-sentence — re-queue it
+            _pending_resume[:] = sentences[i:]
+            break
+    else:
+        _pending_resume.clear()
+    tts_active = False
+    flush_audio_queue()
+    last_wake_time = time.time()
+    unduck()
+
+
+def speak_async(text: str, resume_after: list[str] | None = None):
+    """Start TTS in a background thread so the main loop can detect barge-ins."""
+    global tts_active, _tts_thread
+    _tts_interrupt.clear()
+    if _has_barge_in:
+        _piper_tts.clear_interrupt()
+    tts_active = True
+    flush_audio_queue()
+    sentences = _split_sentences(text)
+    if resume_after:
+        bridge = random.choice(_RESUME_BRIDGES)
+        sentences.append(bridge + " ".join(resume_after))
+    if not sentences:
+        tts_active = False
+        return
+    _tts_thread = threading.Thread(target=_tts_worker, args=(sentences,), daemon=True)
+    _tts_thread.start()
+
+
+def interrupt_tts():
+    """Kill active TTS; _tts_worker saves unspoken sentences to _pending_resume."""
+    global _tts_thread
+    _tts_interrupt.set()
+    if _has_barge_in:
+        _piper_tts.interrupt()
+    if _tts_thread and _tts_thread.is_alive():
+        _tts_thread.join(timeout=1.0)
 
 # ---------------- Enhanced Enrollment ----------------
 
@@ -437,6 +603,8 @@ def main():
     global tts_active
 
     time_intent.set_speak_fn(speak_safe)
+    aiplay_intent.set_speak_fn(speak_safe)
+    lights_intent.discover_lights()
 
     print("🎙️ Nüdle listening (openWakeWord ONNX)")
 
@@ -532,10 +700,10 @@ def main():
                 frame = buffer[:OW_FRAME_SIZE]
                 buffer = buffer[OW_FRAME_SIZE:]
 
-                if tts_active or conversation_active:
+                if conversation_active:
                     continue
 
-                # ---------------- Wake word detection ----------------
+                # ---------------- Wake word detection (also runs during TTS for barge-in) ----------------
                 try:
                     if getattr(ow_model, "inference_framework", None) == "onnx":
                         frame_input = preprocess_onnx_frame(frame)
@@ -549,13 +717,40 @@ def main():
                 score = max(prediction.values(), default=0.0)
                 now = time.time()
                 if not wake_latched and score >= WAKE_CONFIDENCE and (now - last_wake_time) > WAKE_COOLDOWN:
-                    print(f"👂 Wake word detected! (score={score:.2f})")
+                    if tts_active:
+                        print(f"🤫 Potential barge-in (score={score:.2f}) — validating speaker...")
+                        validation_pcm = collect_speech_window(1.0)
+                        barge_valid = False
+                        if validation_pcm:
+                            val_emb, val_features = embed_from_pcm(validation_pcm, debug=True)
+                            if val_emb is not None:
+                                val_name, val_score = speaker_verifier.verify(val_emb, auto_learn=False)
+                                speech_pct = val_features.get("speech_ratio", 0.0)
+                                if val_score >= BARGE_IN_SPEAKER_MIN and speech_pct >= BARGE_IN_SPEECH_MIN:
+                                    print(f"✅ Barge-in confirmed: {val_name} ({val_score:.2f}), speech={speech_pct:.0%}")
+                                    barge_valid = True
+                                else:
+                                    print(f"🚫 Barge-in suppressed: speaker={val_score:.2f}, speech={speech_pct:.0%}")
+                            else:
+                                print(f"🚫 Barge-in suppressed: audio too quiet")
+                        else:
+                            print(f"🚫 Barge-in suppressed: no audio captured")
+
+                        if not barge_valid:
+                            last_wake_time = now
+                            flush_audio_queue()
+                            continue
+                        interrupt_tts()
+                    else:
+                        print(f"👂 Wake word detected! (score={score:.2f})")
                     last_wake_time = now
                     wake_latched = True
                     wake_active = True
                     awaiting_command = True
                     flush_audio_queue()
                     duck()
+                elif tts_active:
+                    continue
 
             # ---------------- Await command ----------------
             if awaiting_command:
@@ -566,6 +761,7 @@ def main():
                 pcm = collect_command_audio()
                 if not pcm:
                     wake_latched = False
+                    last_wake_time = time.time()  # enforce cooldown; prevents immediate re-trigger
                     unduck()
                     continue
 
@@ -585,6 +781,7 @@ def main():
                 text = transcribe(pcm)
                 if not text:
                     wake_latched = False
+                    last_wake_time = time.time()
                     unduck()
                     continue
 
@@ -662,36 +859,28 @@ def main():
                     continue
 
                 # ---------------- Normal command routing ----------------
+                aiplay_intent.set_speaker(speaker_name)
+                lights_intent.set_speaker(speaker_name)
                 response = handle_command(text)
-                tts_active = True
-                flush_audio_queue()
-                try:
-                    if isinstance(response, dict):
-                        conversation_active = True
-                        conversation_context = response
-                        last_interaction_time = time.time()
-                        speak(response["prompt"])
-                    elif response:
-                        speak(response)
-                finally:
-                    flush_audio_queue()
-                    tts_active = False
-                    last_wake_time = time.time()
+                pending = _pending_resume[:]
+                _pending_resume.clear()
+                wake_latched = False
+                if isinstance(response, dict):
+                    conversation_active = True
+                    conversation_context = response
+                    last_interaction_time = time.time()
+                    speak_async(response["prompt"], resume_after=pending or None)
+                elif response:
+                    speak_async(response, resume_after=pending or None)
+                else:
                     unduck()
-                    wake_latched = False
 
             # ---------------- Conversation follow-up ----------------
             if conversation_active:
                 if conversation_expired():
-                    tts_active = True
-                    flush_audio_queue()
-                    speak("Okay, let me know if you need anything.")
-                    flush_audio_queue()
-                    tts_active = False
-                    last_wake_time = time.time()
+                    speak_async("Okay, let me know if you need anything.")
                     conversation_active = False
                     conversation_context = {}
-                    unduck()
                     wake_latched = False
                     continue
 
@@ -703,21 +892,15 @@ def main():
                 print(f"🗣️ Heard: {text}")
 
                 response = handle_followup(text, conversation_context)
-                tts_active = True
-                flush_audio_queue()
                 if isinstance(response, dict):
                     conversation_context = response
-                    speak(response["prompt"])
+                    speak_async(response["prompt"])
                 else:
                     if response:
-                        speak(response)
+                        speak_async(response)
                     conversation_active = False
                     conversation_context = {}
-                    unduck()
                     wake_latched = False
-                flush_audio_queue()
-                tts_active = False
-                last_wake_time = time.time()
 
 # ---------------- Entry point ----------------
 

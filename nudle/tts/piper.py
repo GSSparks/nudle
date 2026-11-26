@@ -6,11 +6,35 @@ import signal
 import io
 import math
 import tempfile
+import threading
 import soundfile as sf
 import sounddevice as sd
 from scipy.signal import resample_poly
 from intents import music
 from intents import radio
+from intents import aiplay
+
+_active_player: subprocess.Popen | None = None
+_player_lock = threading.Lock()
+_interrupted = False
+
+
+def interrupt():
+    global _interrupted, _active_player
+    _interrupted = True
+    with _player_lock:
+        p = _active_player
+    if p and p.poll() is None:
+        p.terminate()
+    try:
+        sd.stop()
+    except Exception:
+        pass
+
+
+def clear_interrupt():
+    global _interrupted
+    _interrupted = False
 
 VOICE_PATH = os.environ.get("PIPER_VOICE", "").strip() or \
     os.path.join(os.path.dirname(__file__), "voices", "en_US-lessac-medium.onnx")
@@ -47,6 +71,7 @@ def speak(text: str):
 
 def _speak_paplay(text: str):
     """Pipe piper WAV directly into paplay — routes through PipeWire default sink."""
+    global _active_player
     proc = subprocess.Popen(
         [PIPER_BIN, "--model", VOICE_PATH, "--output_file", "-", "--quiet"],
         stdin=subprocess.PIPE,
@@ -59,15 +84,20 @@ def _speak_paplay(text: str):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    with _player_lock:
+        _active_player = player
     proc.stdout.close()
     proc.stdin.write(text.encode("utf-8"))
     proc.stdin.close()
     player.wait()
     proc.wait()
+    with _player_lock:
+        _active_player = None
 
 
 def _speak_pw_play(text: str):
     """Generate WAV to temp file, play through PipeWire default sink via pw-play."""
+    global _active_player
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         tmp_path = f.name
     try:
@@ -77,11 +107,16 @@ def _speak_pw_play(text: str):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        subprocess.run(
+        player = subprocess.Popen(
             [PW_PLAY_BIN, tmp_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        with _player_lock:
+            _active_player = player
+        player.wait()
+        with _player_lock:
+            _active_player = None
     finally:
         try:
             os.unlink(tmp_path)
@@ -108,7 +143,7 @@ def _speak_sounddevice(text: str):
 
 
 def _get_active_players():
-    return [p for p in [music.player_process, radio.player_process] if p and p.poll() is None]
+    return [p for p in [music.player_process, radio.player_process, aiplay.player_process] if p and p.poll() is None]
 
 
 def speak_ducked(text: str):

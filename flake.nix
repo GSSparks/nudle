@@ -33,6 +33,7 @@
             espeak-classic   # TTS fallback binary
             mpg123           # alarm sound playback
             mpv              # music + radio stream playback
+            yt-dlp           # YouTube audio URL extraction for aiplay intent
             piper-tts        # neural TTS binary
 
             # Build / utilities
