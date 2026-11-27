@@ -7,11 +7,15 @@ Nüdle is a fully local, offline voice assistant for Linux/NixOS. Wake word + Wh
 ```
 nudle/
   main.py                  # Entry point and main loop — read this first
+  .env                     # Gitignored — HA URL/token, Ollama URL, etc.
   audio/
     backend.py             # FastAPI music library server (separate process)
     ducking.py             # SIGSTOP/SIGCONT ducking of media players
     player.py              # Empty stub
   intents/
+    lights.py              # Home Assistant light control
+    aiplay.py              # AI playlist via Ollama + YouTube (yt-dlp + mpv)
+    llm.py                 # Ollama LLM fallback + smart intent router
     music.py               # Local music playback (mpg123 + backend HTTP)
     radio.py               # Internet radio (mpv)
     time.py                # Time, timers, alarms
@@ -24,6 +28,7 @@ nudle/
     registry.py            # ~/.nudle/speakers/{name}.json storage
     verifier.py            # Cosine similarity verification + auto-learn
     enrollment.py          # Interactive multi-sample enrollment
+    preferences.py         # Per-user music taste + light habit storage
   state/
     conversation.py        # ConversationState class (defined but unused)
   tts/
@@ -41,7 +46,7 @@ install_nudle_pi400.sh     # Raspberry Pi 400 apt installer
 
 ## Development Environment
 
-**NixOS (primary):** `nix develop` — provides Python 3.11, portaudio, piper-tts, espeak, mpg123, ffmpeg.
+**NixOS (primary):** `nix develop` — provides Python 3.11, portaudio, piper-tts, espeak, mpg123, mpv, yt-dlp, ffmpeg.
 
 **Raspberry Pi 400:** run `bash install_nudle_pi400.sh`
 
@@ -59,6 +64,20 @@ install_nudle_pi400.sh     # Raspberry Pi 400 apt installer
 | `nudle/assets/Hey_Noodle.onnx` | Wake word model | Custom trained or swap for a stock OWW model |
 | `nudle/tts/voices/en_US-lessac-medium.onnx` | Piper voice | `piper --download-voice en_US-lessac-medium` |
 | `~/.nudle/speakers/` | Enrolled speaker profiles | Created automatically at runtime |
+| `~/.nudle/preferences/` | Per-user music/light preferences | Created automatically at runtime |
+| `nudle/.env` | HA URL/token, Ollama URL, model name | Create manually — see `.env` section below |
+
+## Environment Variables (.env)
+
+`nudle/.env` is loaded at startup. All keys are optional; omitting them disables the corresponding feature.
+
+| Key | Example | Purpose |
+|-----|---------|---------|
+| `NUDLE_HA_URL` | `https://ha.example.com` | Home Assistant base URL |
+| `NUDLE_HA_TOKEN` | `eyJ...` | HA long-lived access token |
+| `NUDLE_OLLAMA_URL` | `http://192.168.1.x:11434` | Ollama API base URL |
+| `NUDLE_LLM_MODEL` | `qwen3.5:4b` | Ollama model for LLM fallback and aiplay |
+| `NUDLE_AIPLAY_TRACKS` | `5` | Tracks per AI-generated playlist |
 
 ## Intent System
 
@@ -84,6 +103,8 @@ Then implement `handle_followup(text, context)` and register it in `main.py`'s `
 | `WAKE_COOLDOWN` | 20 s | Re-triggering too quickly |
 | `COMMAND_TIMEOUT` | 2.0 s | Commands get cut off |
 | `CONVERSATION_TIMEOUT` | 5 s | Follow-up window too short/long |
+| `BARGE_IN_SPEAKER_MIN` | 0.35 | Lower = more sensitive to barge-in |
+| `BARGE_IN_SPEECH_MIN` | 0.15 | Lower = accept quieter interruptions |
 
 ## Speaker Recognition Thresholds
 
@@ -106,7 +127,7 @@ Piper uses `aplay` for output; adjust `-r 22050 -f S16_LE` flags in `tts/piper.p
 - `intents/time.py`'s internal `speak()` is a print-only stub; timer/alarm completion is silent to the user
 - Wake word path is hardcoded to `/home/gsparks/nudle/nudle/assets/Hey_Noodle.onnx`
 - Weather ZIP is hardcoded to `46711` in `intents/weather.py`
-- `state/conversation.py` and `audio/player.py` and `intents/status.py` are empty stubs
+- `state/conversation.py`, `audio/player.py`, and `intents/status.py` are empty stubs
 
 ## Full Documentation
 

@@ -8,7 +8,8 @@ Provides:
 - Python 3.11 + pip + virtualenv
 - System audio libraries: `portaudio`, `libffi`, `ffmpeg`, `alsa-utils`
 - TTS: `espeak-classic`, `piper-tts`
-- Audio player: `mpg123`
+- Audio players: `mpg123`, `mpv`
+- Media tools: `yt-dlp`
 - Build tools: `pkg-config`, `curl`, `git`
 
 Shell hook behavior:
@@ -53,6 +54,8 @@ Canonical Python dependency list for `pip install -r requirements.txt`:
 | pytz | >=2023.3 | Time zone support |
 | fastapi | latest | Music backend API |
 | mutagen | latest | MP3 tag reading |
+| requests | latest | HTTP client (HA API, Ollama API, wttr.in) |
+| yt-dlp | latest | YouTube audio URL resolution (aiplay) |
 
 ## .gitignore
 

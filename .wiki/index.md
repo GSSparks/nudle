@@ -19,12 +19,12 @@ Microphone (sounddevice)
                                                      |
                                              Whisper STT
                                                      |
-                                           ┌──────────────────┐
-                                           │   Intent Router   │
-                                           │  time / radio /   │
-                                           │  music / weather  │
-                                           │  gag / enroll     │
-                                           └──────────────────┘
+                                    ┌────────────────────────────┐
+                                    │        Intent Router        │
+                                    │  lights / aiplay / music /  │
+                                    │  radio / time / weather /   │
+                                    │  gag / enroll / llm         │
+                                    └────────────────────────────┘
                                                      |
                                              Piper TTS → aplay
                                                      |
@@ -58,6 +58,9 @@ They communicate over HTTP at `http://127.0.0.1:8000`.
 
 | File | Wiki Page | Description |
 |------|-----------|-------------|
+| `nudle/intents/lights.py` | [intents_lights.md](intents_lights.md) | Home Assistant light control |
+| `nudle/intents/aiplay.py` | [intents_aiplay.md](intents_aiplay.md) | AI-generated playlists via Ollama + YouTube |
+| `nudle/intents/llm.py` | [intents_llm.md](intents_llm.md) | Ollama LLM fallback and smart intent router |
 | `nudle/intents/music.py` | [intents_music.md](intents_music.md) | Local music playback via mpg123 |
 | `nudle/intents/radio.py` | [intents_radio.md](intents_radio.md) | Internet radio streams via mpv |
 | `nudle/intents/time.py` | [intents_time.md](intents_time.md) | Current time, timers, alarms |
@@ -73,6 +76,7 @@ They communicate over HTTP at `http://127.0.0.1:8000`.
 | `nudle/speaker/registry.py` | [speaker_registry.md](speaker_registry.md) | Persistent JSON embedding storage |
 | `nudle/speaker/verifier.py` | [speaker_verifier.md](speaker_verifier.md) | Cosine similarity verification + auto-learning |
 | `nudle/speaker/enrollment.py` | [speaker_enrollment.md](speaker_enrollment.md) | Interactive multi-sample enrollment |
+| `nudle/speaker/preferences.py` | [speaker_preferences.md](speaker_preferences.md) | Per-user music taste and light habit storage |
 
 ### TTS
 
@@ -100,11 +104,19 @@ They communicate over HTTP at `http://127.0.0.1:8000`.
 
 **Wake word:** Custom `Hey_Noodle.onnx` model loaded via openWakeWord. The main loop manually preprocesses frames to log-mel spectrograms for ONNX inference rather than using the library's default pipeline.
 
+**Barge-in suppression:** After wake word detection, 1 second of audio is collected and validated (speaker cosine score + speech ratio) before committing to an interrupt. This prevents Nüdle from hearing its own TTS output and re-triggering.
+
 **Speaker recognition:** pyannote.audio embeddings + cosine similarity. Auto-learns new samples above 0.80 confidence. Enrollment requires 5 high-quality samples with internal consistency checks.
 
-**Intent routing:** Sequential `can_handle()` / `handle()` calls. No ML, no grammar, just keyword matching and regex. Extendable: add a new module to the list in `handle_command()`.
+**Per-user preferences:** Music prompts and light room habits are stored per speaker in `~/.nudle/preferences/{name}.json`. Completed playlists are weighted 2x over stopped ones, so genuine taste rises faster.
 
-**Multi-turn conversations:** An intent can return a `dict` instead of a `str` to trigger a follow-up loop. Currently used only by timers and alarms in `intents/time.py`.
+**Intent routing:** Sequential `can_handle()` / `handle()` calls across keyword-based intents. The LLM intent (`llm.py`) is the final fallback and returns structured JSON to re-dispatch to real intents (lights, music, weather, time, radio) rather than chatting about what it cannot do.
+
+**Music routing:** `aiplay` is checked before local music when the request is mood/genre/vague ("play some chill jazz"). Specific artist lookups ("play Radiohead") go to local music. Stop/skip kills all active players (mpg123, mpv, aiplay).
+
+**Home Assistant lights:** Entity discovery runs at startup via `/api/states`. Lights are identified by attribute presence (brightness, color_temp) or friendly-name keywords across all non-sensor domains. Automation `_on`/`_off` pairs are discovered separately and triggered via `automation/trigger` for entities like outdoor lights that have no direct switch.
+
+**Multi-turn conversations:** An intent can return a `dict` instead of a `str` to trigger a follow-up loop. Currently used by timers, alarms, and the music slot disambiguation flow.
 
 **Audio ducking:** SIGSTOP/SIGCONT on player subprocesses. Avoids mixing TTS with music/radio.
 
